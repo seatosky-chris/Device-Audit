@@ -1,0 +1,11 @@
+Testing/
+Usage/
+Logs/
+History/
+Config Files/*
+Config Files/Archive
+*.lnk
+
+# Allow these config file templates
+!Config Files/*.template
+!Config Files/Template.ps1

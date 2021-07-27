@@ -1,0 +1,306 @@
+##################################################################################################################
+############################################  GLOBAL CONFIGURATION  ##############################################
+##################################################################################################################
+### This file acts as a global configuration file for the Device Audit powershell script.
+### These variables will effect all companies.
+### You can overwrite these variables on a per-company basis by adding them into a company config file.
+##################################################################################################################
+
+####################
+# $UsernameBlacklist
+#
+# When recording computer usage, ignore any devices logged in with these usernames
+#
+# Example: $UsernameBlacklist = @("Administrator", "Admin")
+#
+$UsernameBlacklist = @("Administrator", "Admin", "User", "root", "Guest")
+
+##################################################################################################################
+##############################################  EXPORT LOCATIONS  ################################################
+##################################################################################################################
+###
+### These variables can be used to move the exported device list csv's to a specific location
+### Copy can be set to true in each if you want it to copy the file, if false it will move the file
+### You can set Location to $false to leave the files alone.
+### Note: These moves happen right after the file is created. Also, it will overwrite existing files without warning.
+### Don't forget these can be overwritten in the company config files directly if you want a specific folder for each company.
+##################################################################################################################
+
+####################
+# $MoveCustomerList
+#
+# The location to move the main device list (for customers to)
+#
+# Example: $MoveCustomerList = @{
+# 	Location = "C:\Users\Administrator\Documents\Device Audits"
+#	  Copy = $true
+# }
+#
+$MoveCustomerList = @{
+	Location = "C:\Users\Administrator\Documents\Device Audits"
+	Copy = $true
+}
+
+####################
+# $MoveTechList
+#
+# The location to move the tech device list to
+#
+# Example: $MoveTechList = @{
+# 	Location = "C:\Users\Administrator\Documents\Device Audits"
+#	  Copy = $false
+# }
+#
+$MoveTechList = @{
+	Location = "C:\Users\Administrator\Documents\Device Audits"
+	Copy = $true
+}
+
+####################
+# $MoveAutoList
+#
+# The location to move the automation csv to
+#
+# Example: $MoveTechList = @{
+# 	Location = $false
+#	Copy = $false
+# }
+#
+$MoveAutoList = @{
+	Location = $false
+	Copy = $false
+}
+
+####################
+# $HistoryLocation
+#
+# The location to store history files of the device audit (can be used by other scripts to get usage stats, who uses which computer, etc.)
+#
+# Example: $HistoryLocation = "C:\Users\Administrator\Documents\DeviceAuditHistory"
+#
+$HistoryLocation = "C:\Users\Administrator\Documents\DeviceAuditHistory"
+
+####################
+# $LogLocation
+#
+# The location to store logs of automated changes (deletions, installs, etc.)
+#
+# Example: $LogLocation = "C:\Users\Administrator\Documents\DeviceAuditLogs"
+#
+$LogLocation = "C:\Users\Administrator\Documents\Device Audit\Logs"
+
+####################
+# $EmailFrom
+#
+# Set the email address and name you want to send device audit emails from
+#
+# Example: @{
+#   Email = 'device_audit@app.sts.com'
+#   Name = "Device Audit"
+# }
+#
+$EmailFrom = @{
+	Email = 'device_audit@app.sts.com'
+	Name = "Device Audit"
+}
+  
+####################
+# $EmailTo_FailedFixes
+#
+# Set the email addresses and names you want to send device audit auto-fix failure emails to
+#
+# Example: @(
+#   @{
+#      Email = 'support@sts.com'
+#      Name = "Sea to Sky Helpdesk"
+#   }
+# )
+#
+$EmailTo_FailedFixes = @(
+	@{
+		Email = 'support@sts.com'
+		Name = "Sea to Sky Helpdesk"
+	}
+)
+
+####################
+# $EmailTo_BillingUpdate
+#
+# Set the email addresses and names you want to send device audit emails to
+# For billing updates (how the bill needs to change)
+#
+# Example: @(
+#   @{
+#      Email = 'accounting@sts.com'
+#      Name = "Sea to Sky Accounting"
+#   }
+# )
+#
+$EmailTo_BillingUpdate = @(
+	@{
+		Email = 'accounting@sts.com'
+		Name = "Sea to Sky Accounting"
+	}
+)
+
+##############################################################################################
+###################################  HTML Email Template  ####################################
+####  The below variable is an HTML email template used by the Device Audit script
+####  You should use it with string formatting like so: $EmailTemplate -f "Intro", "Title", "Body", "Footer"
+####  There are a few locations in the body where you can enter data through string formatting:
+####	0 - The intro line, e.g. 'Auto-Fix failed on STS-1000.'
+####	1 - The title (in bold), e.g. 'Auto-Fix Failed'
+####	2 - The body, this should be written in html and can be any length you wish, e.g. <ul><li>Issue #1</li> <li>Issue #2</li></ul>
+####	3 - Optional footer text at the end, e.g. 'Please correct these issues asap!'
+##############################################################################################
+$EmailTemplate = '
+<!doctype html>
+<html>
+  <head>
+    <meta name="viewport" content="width=device-width">
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    <title>Simple Transactional Email</title>
+    <style>
+    /* -------------------------------------
+        INLINED WITH htmlemail.io/inline
+    ------------------------------------- */
+	.mobile_table_fallback {{
+		display: none;
+	}}
+    /* -------------------------------------
+        RESPONSIVE AND MOBILE FRIENDLY STYLES
+    ------------------------------------- */
+    @media only screen and (max-width: 620px) {{
+      table[class=body] h1 {{
+        font-size: 28px !important;
+        margin-bottom: 10px !important;
+      }}
+      table[class=body] p,
+            table[class=body] ul,
+            table[class=body] ol,
+            table[class=body] td,
+            table[class=body] span,
+            table[class=body] a {{
+        font-size: 16px !important;
+      }}
+      table[class=body] .wrapper,
+            table[class=body] .article {{
+        padding: 10px !important;
+      }}
+      table[class=body] .content {{
+        padding: 0 !important;
+      }}
+      table[class=body] .container {{
+        padding: 0 !important;
+        width: 100% !important;
+      }}
+      table[class=body] .main {{
+        border-left-width: 0 !important;
+        border-radius: 0 !important;
+        border-right-width: 0 !important;
+      }}
+      table[class=body] .btn table {{
+        width: 100% !important;
+      }}
+      table[class=body] .btn a {{
+        width: 100% !important;
+      }}
+      table[class=body] .img-responsive {{
+        height: auto !important;
+        max-width: 100% !important;
+        width: auto !important;
+      }}
+	  table.desktop_only_table {{
+		  display: none;
+	  }}
+	  .mobile_table_fallback {{
+		  display: block !important;
+	  }}
+    }}
+
+    /* -------------------------------------
+        PRESERVE THESE STYLES IN THE HEAD
+    ------------------------------------- */
+    @media all {{
+      .ExternalClass {{
+        width: 100%;
+      }}
+      .ExternalClass,
+            .ExternalClass p,
+            .ExternalClass span,
+            .ExternalClass font,
+            .ExternalClass td,
+            .ExternalClass div {{
+        line-height: 100%;
+      }}
+      .apple-link a {{
+        color: inherit !important;
+        font-family: inherit !important;
+        font-size: inherit !important;
+        font-weight: inherit !important;
+        line-height: inherit !important;
+        text-decoration: none !important;
+      }}
+      #MessageViewBody a {{
+        color: inherit;
+        text-decoration: none;
+        font-size: inherit;
+        font-family: inherit;
+        font-weight: inherit;
+        line-height: inherit;
+      }}
+    }}
+    </style>
+  </head>
+  <body class="" style="background-color: #f6f6f6; font-family: sans-serif; -webkit-font-smoothing: antialiased; font-size: 14px; line-height: 1.4; margin: 0; padding: 0; -ms-text-size-adjust: 100%; -webkit-text-size-adjust: 100%;">
+    <span class="preheader" style="color: transparent; display: none; height: 0; max-height: 0; max-width: 0; opacity: 0; overflow: hidden; mso-hide: all; visibility: hidden; width: 0;">This is preheader text. Some clients will show this text as a preview.</span>
+    <table border="0" cellpadding="0" cellspacing="0" class="body" style="border-collapse: separate; mso-table-lspace: 0pt; mso-table-rspace: 0pt; width: 100%; background-color: #f6f6f6;">
+      <tr>
+        <td style="font-family: sans-serif; font-size: 14px; vertical-align: top;">&nbsp;</td>
+        <td class="container" style="font-family: sans-serif; font-size: 14px; vertical-align: top; display: block; Margin: 0 auto; max-width: 580px; padding: 10px; width: 580px;">
+          <div class="content" style="box-sizing: border-box; display: block; Margin: 0 auto; max-width: 580px; padding: 10px;">
+
+            <!-- START CENTERED WHITE CONTAINER -->
+            <table class="main" style="border-collapse: separate; mso-table-lspace: 0pt; mso-table-rspace: 0pt; width: 100%; background: #ffffff; border-radius: 3px;">
+
+              <!-- START MAIN CONTENT AREA -->
+              <tr>
+                <td class="wrapper" style="font-family: sans-serif; font-size: 14px; vertical-align: top; box-sizing: border-box; padding: 20px;">
+                  <table border="0" cellpadding="0" cellspacing="0" style="border-collapse: separate; mso-table-lspace: 0pt; mso-table-rspace: 0pt; width: 100%;">
+                    <tr>
+                      <td style="font-family: sans-serif; font-size: 14px; vertical-align: top;">
+                        <p style="font-family: sans-serif; font-size: 14px; font-weight: normal; margin: 0; Margin-bottom: 15px;">{0}</p>
+						<br />
+                        <p style="font-family: sans-serif; font-size: 18px; font-weight: normal; margin: 0; Margin-bottom: 15px;"><strong>{1}</strong></p>
+                        {2}
+						<br />
+                        <p style="font-family: sans-serif; font-size: 14px; font-weight: normal; margin: 0; Margin-bottom: 15px;">{3}</p>
+                      </td>
+                    </tr>
+                  </table>
+                </td>
+              </tr>
+
+            <!-- END MAIN CONTENT AREA -->
+            </table>
+
+            <!-- START FOOTER -->
+            <div class="footer" style="clear: both; Margin-top: 10px; text-align: center; width: 100%;">
+              <table border="0" cellpadding="0" cellspacing="0" style="border-collapse: separate; mso-table-lspace: 0pt; mso-table-rspace: 0pt; width: 100%;">
+                <tr>
+                  <td class="content-block" style="font-family: sans-serif; vertical-align: top; padding-bottom: 10px; padding-top: 10px; font-size: 12px; color: #999999; text-align: center;">
+                    <span class="apple-link" style="color: #999999; font-size: 12px; text-align: center;">Sea to Sky Network Solutions, 2554 Vine Street, Vancouver BC V6K 3L1</span>
+                  </td>
+                </tr>
+              </table>
+            </div>
+            <!-- END FOOTER -->
+
+          <!-- END CENTERED WHITE CONTAINER -->
+          </div>
+        </td>
+        <td style="font-family: sans-serif; font-size: 14px; vertical-align: top;">&nbsp;</td>
+      </tr>
+    </table>
+  </body>
+</html>'

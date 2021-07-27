@@ -1,0 +1,55 @@
+##################################################################################################################
+##################################################  API KEYS  ####################################################
+##################################################################################################################
+### This file holds all API Keys that the script uses
+##################################################################################################################
+
+# $DattoAPIKey
+#
+# Your Datto RMM API key details
+# Not required but highly recommended (alternatively can use a csv)
+#
+$DattoAPIKey = @{
+	Url = "https://x-api.centrastage.net"
+	Key = ""
+	SecretKey = ""
+	Region = "zinfandel"
+}
+
+# $SophosAPIKey
+#
+# Your Sophos API key details 
+# Required for Sophos checks to work
+#
+$SophosAPIKey = @{
+	ClientID = ""
+	Secret = ""
+}
+
+# SCLogin
+#
+# Your ScreenConnect username and password
+# Not required but highly recommended (alternatively can use a csv)
+# URL is just your screenconnect url (e.g. https://screenconnect.com)
+#
+$SCLogin = @{
+	Username = ""
+	Password = ""
+	URL = ""
+}
+
+# SC_Nonce
+#
+# A working ScreenConnect Nonce
+# Manually obtained from SC.util.getRandomAlphanumericString(16);  (it just seems to care that the format is correct)
+#
+$SC_Nonce = ""
+
+# $Email_APIKey
+#
+# The global APIKey for the email forwarder. The key should give access to all organizations.
+#
+$Email_APIKey = @{
+	Url = "https://automationmailer.azurewebsites.net/api/MailForwarder?ResourceURI="
+	Key = ""
+}
