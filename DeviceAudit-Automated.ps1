@@ -90,6 +90,8 @@ function Convert-UTCtoLocal {
 	return $LocalTime
 }
 
+$DeviceCount_Overview = @()
+
 ### This code is unique for each company, lets loop through each company and run this code on each
 foreach ($ConfigFile in $CompaniesToAudit) {
 	. "$PSScriptRoot\Config Files\Global-Config.ps1" # Reimport Global Config to reset anything that was overridden
@@ -2545,6 +2547,22 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				Count = @($AllServers | Where-Object { $_.Hostname -like "*BDR*" }).count
 			}
 
+			# Build an overview document
+			if ($companies -contains "ALL") {
+				$DeviceCount_Overview += [PSCustomObject]@{
+					Company = $OrgFullName
+					"Billed Servers" = @($AllDevices | Where-Object { $_.DeviceType -like "Server" -and $_.Billed -like "Yes*" }).count
+					"Billed Workstations" = @($AllDevices | Where-Object { $_.DeviceType -notlike "Server" -and $_.Billed -like "Yes*" }).count
+					"Unbilled Servers" = @($AllDevices | Where-Object { $_.DeviceType -like "Server" -and $_.Billed -like "No*" }).count
+					"Unbilled Workstations" = @($AllDevices | Where-Object { $_.DeviceType -notlike "Server" -and $_.Billed -like "No*" }).count
+					"Total Servers" = @($AllDevices | Where-Object { $_.DeviceType -like "Server" }).count
+					"Total Workstations" = @($AllDevices | Where-Object { $_.DeviceType -notlike "Server" }).count
+					"Servers - Physical" = @($AllServers | Where-Object { $_.Hostname -notlike "*BDR*" -and $_.Model -and $_.Model -notlike "*Virtual*" }).count
+					"Servers - Virtual" = @($AllServers | Where-Object { $_.Hostname -notlike "*BDR*" -and ($_.Model -like "*Virtual*" -or !$_.Model) }).count
+					"Servers - BDR" = @($AllServers | Where-Object { $_.Hostname -like "*BDR*" }).count
+				}
+			}
+
 			# Export to json file so we can check for changes between months
 			if ($HistoryLocation) {
 				if (!(Test-Path -Path $HistoryLocation)) {
@@ -2783,5 +2801,25 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 		Write-Host "Device list built."
 		Write-Host "======================"
+	}
+}
+
+# If auditing all companies we have created an overview document, lets export and excel doc of it
+if ($companies -contains "ALL" -and ($DeviceCount_Overview | Measure-Object).Count -gt 0) {
+	$MonthName = (Get-Culture).DateTimeFormat.GetMonthName([int](Get-Date -Format MM))
+	$Year = Get-Date -Format yyyy
+	$FileName = "Device_Overview--$($MonthName)_$Year.xlsx"
+	$Path = $PSScriptRoot + "\$FileName"
+	Remove-Item $Path -ErrorAction SilentlyContinue
+
+	$DeviceCount_Overview | Sort-Object -Property Company | 
+		Export-Excel $Path -WorksheetName "Device Count Overview" -AutoSize -AutoFilter -NoNumberConversion * -TableName "DeviceOverview" -Title "Device Count Overview" -TitleBold -TitleSize 18 -Now
+
+	if ($MoveOverview.Location -and (Test-Path -Path $MoveOverview.Location)) {
+		if ($MoveOverview.Copy) {
+			Copy-Item -Path $Path -Destination $MoveOverview.Location -Force
+		} else {
+			Move-Item -Path $Path -Destination $MoveOverview.Location -Force
+		}	
 	}
 }
