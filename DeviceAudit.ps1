@@ -2236,7 +2236,7 @@ if ($DOUsageDBSave) {
 	if (!$StatsLastUpdated -or ($StatsLastUpdated -and (Get-Date $StatsLastUpdated.LastUpdated) -lt $CheckDate)) {
 		# Get all usage documents
 		$Year_Month = Get-Date (Get-Date).AddMonths(-1) -Format 'yyyy-MM'
-		$Usage = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "$($Company_Acronym)_Usage" -Query "SELECT * FROM Usage AS u WHERE u.yearmonth = '$Year_Month'" -PartitionKey $Year_Month
+		$Usage = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Usage" -Query "SELECT * FROM Usage AS u WHERE u.yearmonth = '$Year_Month'" -PartitionKey $Year_Month
 
 		# Calculate monthly stats
 		if ($Usage) {
