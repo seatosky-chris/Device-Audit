@@ -50,6 +50,14 @@ $SC_Nonce = ""
 # The global APIKey for the email forwarder. The key should give access to all organizations.
 #
 $Email_APIKey = @{
-	Url = "https://automationmailer.azurewebsites.net/api/MailForwarder?ResourceURI="
+	Url = ""
 	Key = ""
+}
+
+# $Database_Connection
+#
+# The CosmosDB resource group
+#
+$Database_Connection = @{
+	ResourceGroup = ""
 }
