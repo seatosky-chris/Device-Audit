@@ -2354,6 +2354,12 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					New-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Users" -DocumentBody $User -PartitionKey 'user' | Out-Null
 				} else {
 					$UserID = $User[0].Id
+					if (!$User.DomainOrLocal) {
+						$User.DomainOrLocal = if ($Domain) { "Domain" } else { "Local" }
+						$User.Domain = $Domain
+						$User.LastUpdated = $Now_UTC
+						Set-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Users" -Id $UserID -DocumentBody ($User | ConvertTo-Json) -PartitionKey 'user' | Out-Null
+					}
 				}
 	
 				# Add a usage entry
