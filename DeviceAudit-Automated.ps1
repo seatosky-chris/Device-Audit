@@ -2284,7 +2284,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				} else {
 					# Computer exists, see if we need to update the details
 					$UpdateRequired = $false
-					$UpdatedComputer = $Computers[0]
+					$UpdatedComputer = $Computers[0] | Select-Object Id, Hostname, SC_ID, RMM_ID, Sophos_ID, DeviceType, SerialNumber, Manufacturer, Model, OS, WarrantyExpiry, LastUpdated, type
 					if ($Hostname -ne $Computers.Hostname) {
 						$UpdatedComputer.Hostname = $Hostname
 						$UpdateRequired = $true
@@ -2353,6 +2353,8 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					} | ConvertTo-Json
 					New-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Users" -DocumentBody $User -PartitionKey 'user' | Out-Null
 				} else {
+					# If changing fields, update in user audit as well
+					$User = $User | Select-Object Id, Domain, DomainOrLocal, Username, LastUpdated, type, O365Email, ITG_ID, ADUsername
 					$UserID = $User[0].Id
 					if (!$User.DomainOrLocal) {
 						$User.DomainOrLocal = if ($Domain) { "Domain" } else { "Local" }
