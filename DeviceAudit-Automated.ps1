@@ -14,6 +14,12 @@ param($companies = @())
 . "$PSScriptRoot\Config Files\Global-Config.ps1" # Global Config
 #####################################################################
 
+# Setup logging
+If (Get-Module -ListAvailable -Name "PSFramework") {Import-module PSFramework} Else { install-module PSFramework -Force; import-module PSFramework}
+$logFile = Join-Path -path "$PSScriptRoot\ErrorLogs" -ChildPath "log-$(Get-date -f 'yyyyMMddHHmmss').txt";
+Set-PSFLoggingProvider -Name logfile -FilePath $logFile -Enabled $true;
+
+Write-PSFMessage -Level Verbose -Message "Starting audit on: $($companies | ConvertTo-Json)"
 $CompaniesToAudit = @()
 if ($companies -contains "ALL") {
 	$CompaniesToAudit = (Get-ChildItem "$PSScriptRoot\Config Files\" | Where-Object { $_.PSIsContainer -eq $false -and $_.Extension -eq '.ps1' -and $_.Name -like "Config-*" }).Name
@@ -36,22 +42,24 @@ if ($companies -contains "ALL") {
 }
 
 if ($CompaniesToAudit.Count -eq 0) {
-	Write-Host "No configuration files were found. Exiting!" -ForegroundColor Red
+	Write-Warning "No configuration files were found. Exiting!"
+	Write-PSFMessage -Level Warning -Message "No configuration files found."
 	if ($companies.count -eq 0) {
-		Write-Host "Please try again using the 'companies' argument.  e.g. DeviceAudit-Automated.ps1 -companies STS, AVA, MV" -ForegroundColor Red
+		Write-Warning "Please try again using the 'companies' argument.  e.g. DeviceAudit-Automated.ps1 -companies STS, AVA, MV"
 	} else {
-		Write-Host "Please try again. The 'companies' argument did not seem to map to a valid config file." -ForegroundColor Red
+		Write-Warning "Please try again. The 'companies' argument did not seem to map to a valid config file."
 	}
 	exit
 }
 
-Write-Host "Computer audit starting..."
+Write-Output "Computer audit starting..."
 
 ### This code is common for every company and can be ran before looping through multiple companies
 $CurrentTLS = [System.Net.ServicePointManager]::SecurityProtocol
 if ($CurrentTLS -notlike "*Tls12" -and $CurrentTLS -notlike "*Tls13") {
 	[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-	Write-Host "This device is using an old version of TLS. Temporarily changed to use TLS v1.2."
+	Write-Output "This device is using an old version of TLS. Temporarily changed to use TLS v1.2."
+	Write-PSFMessage -Level Warning -Message "Temporarily changed TLS to TLS v1.2."
 }
 
 # Import/Install any required modules
@@ -63,7 +71,11 @@ If (Get-Module -ListAvailable -Name "DattoRMM") {Import-module DattoRMM -Force} 
 
 # Connect to Azure
 if (Test-Path "$PSScriptRoot\Config Files\AzureServiceAccount.json") {
-	Import-AzContext -Path "$PSScriptRoot\Config Files\AzureServiceAccount.json"
+	try {
+		Import-AzContext -Path "$PSScriptRoot\Config Files\AzureServiceAccount.json"
+	} catch {
+		Write-PSFMessage -Level Error -Message "Failed to connect to: Azure"
+	}
 } else {
 	Connect-AzAccount
 	Save-AzContext -Path "$PSScriptRoot\Config Files\AzureServiceAccount.json"
@@ -81,11 +93,28 @@ $FormBody = @(
 	$false,
 	$Nonce
 ) | ConvertTo-Json
-$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/AuthenticationService.ashx/TryLogin" -SessionVariable 'SCWebSession' -Body $FormBody -Method 'POST' -ContentType 'application/json'
+
+try {
+	$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/AuthenticationService.ashx/TryLogin" -SessionVariable 'SCWebSession' -Body $FormBody -Method 'POST' -ContentType 'application/json'
+} catch {
+	Write-PSFMessage -Level Error -Message "Failed to connect to: ScreenConnect"
+	Write-PSFMessage -Level Error -Message "Status Code: $($_.Exception.Response.StatusCode.Value__)"
+	Write-PSFMessage -Level Error -Message "Message: $($_.Exception.Message)"
+	Write-PSFMessage -Level Error -Message "Status Description: $($_.Exception.Response.StatusDescription)"
+	Write-PSFMessage -Level Error -Message "URL attempted: $($SCLogin.URL)/Services/AuthenticationService.ashx/TryLogin"
+	Write-PSFMessage -Level Error -Message "Username used: $($SCLogin.Username)"
+}
+if (!$Response) {
+	Write-PSFMessage -Level Error -Message "Failed to connect to: ScreenConnect"
+}
 
 # Download the full device list report and then import it
 $Response = Invoke-WebRequest "$($SCLogin.URL)/Report.csv?ReportType=Session&SelectFields=SessionID&SelectFields=Name&SelectFields=GuestMachineName&SelectFields=GuestMachineSerialNumber&SelectFields=GuestHardwareNetworkAddress&SelectFields=GuestOperatingSystemName&SelectFields=GuestLastActivityTime&SelectFields=GuestInfoUpdateTime&SelectFields=GuestLastBootTime&SelectFields=GuestLoggedOnUserName&SelectFields=GuestLoggedOnUserDomain&SelectFields=GuestMachineManufacturerName&SelectFields=GuestMachineModel&SelectFields=GuestMachineDescription&SelectFields=CustomProperty1&Filter=SessionType%20%3D%20'Access'%20AND%20NOT%20IsEnded&AggregateFilter=&ItemLimit=100000" -WebSession $SCWebSession
 $SC_Devices_Full = $Response.Content | ConvertFrom-Csv
+
+if (!$SC_Devices_Full) {
+	Write-PSFMessage -Level Error -Message "Failed to get: Device List from ScreenConnect"
+}
 
 # Function to convert imported UTC date/times to local time for easier comparisons
 function Convert-UTCtoLocal {
@@ -102,8 +131,9 @@ $DeviceCount_Overview = @()
 foreach ($ConfigFile in $CompaniesToAudit) {
 	. "$PSScriptRoot\Config Files\Global-Config.ps1" # Reimport Global Config to reset anything that was overridden
 	. "$PSScriptRoot\Config Files\$ConfigFile" # Import company config
-	Write-Host "============================="
-	Write-Host "Starting audit for $Company_Acronym" -ForegroundColor Green
+	Write-Output "============================="
+	Write-Output "Starting audit for $Company_Acronym" 
+	Write-PSFMessage -Level Verbose -Message "Starting audit on: $Company_Acronym"
 
 	if ($Sophos_Company) {
 		$OrgFullName = $Sophos_Company
@@ -147,6 +177,8 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				for ($i = 2; $i -le $TotalPages; $i++) {
 					$SophosTenants.items += (Invoke-RestMethod -Method GET -Headers $SophosHeader -uri "https://api.central.sophos.com/partner/v1/tenants?page=$i").items
 				}
+			} else {
+				Write-PSFMessage -Level Error -Message "Failed to connect to: Sophos (No Tenants Found)"
 			}
 
 			# Get the tenants ID and URL
@@ -154,8 +186,14 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				$CompanyInfo = $SophosTenants.items | Where-Object { $_.name -like $Sophos_Company }
 				$SophosTenantID = $CompanyInfo.id
 				$TenantApiHost = $CompanyInfo.apiHost
+			} else {
+				Write-PSFMessage -Level Error -Message "Failed to connect to: Sophos (Tenant not found)"
 			}
+		} else {
+			Write-PSFMessage -Level Error -Message "Failed to connect to: Sophos (No Partner ID)"
 		}
+	} else {
+		Write-PSFMessage -Level Error -Message "Failed to connect to: Sophos (No JWT)"
 	}
 
 	# Finally get the Sophos endpoints
@@ -181,13 +219,19 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				$NextKey = $SophosEndpoints_NextPage.pages.nextKey
 			}
 		}
+
+		if (!$SophosEndpoints) {
+			Write-PSFMessage -Level Error -Message "Failed to get: Device List from Sophos"
+		}
+	} else {
+		Write-PSFMessage -Level Error -Message "Failed to connect to: Sophos (No Tenant ID or API Host)"
 	}
 
 	if ($SophosEndpoints -and $SophosEndpoints.items) {
 		$Sophos_Devices = $SophosEndpoints.items | Where-Object { $_.type -eq "computer" -or $_.type -eq "server" }
 	} else {
 		$Sophos_Devices = @()
-		Write-Host "Warning! Could not get device list from Sophos!" -ForegroundColor Red
+		Write-Warning "Warning! Could not get device list from Sophos!"
 	}
 
 	############
@@ -195,7 +239,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	###########
 
 	# Get RMM devices
-	Set-DrmmApiParameters -Url $DattoAPIKey.URL -Key $DattoAPIKey.Key -SecretKey $DattoAPIKey.SecretKey
+	$Response = Set-DrmmApiParameters -Url $DattoAPIKey.URL -Key $DattoAPIKey.Key -SecretKey $DattoAPIKey.SecretKey 6>&1
 	if ($RMM_ID) {
 		if ($RMM_ID -match "^\d+$") {
 			$CompanyInfo = Get-DrmmAccountSites | Where-Object { $_.id -eq $RMM_ID }
@@ -204,6 +248,11 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		$RMM_Devices = Get-DrmmSiteDevices $RMM_ID | Where-Object { $_.deviceClass -eq 'device' -and $_.deviceType.category -in @("Laptop", "Desktop", "Server") }
 	} else {
 		$RMM_Devices = Import-Csv $RMM_CSV
+	}
+
+	if (!$RMM_Devices) {
+		Write-PSFMessage -Level Error -Message "Failed to get: Device List from RMM"
+		Write-PSFMessage -Level Error -Message "Error: $Response"
 	}
 
 	# Get RMM device details if using the API
@@ -229,8 +278,8 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		Write-Progress -Activity "Getting RMM device details" -Status "Ready" -Completed
 	}
 
-	Write-Host "Imported all devices."
-	Write-Host "===================="
+	Write-Output "Imported all devices."
+	Write-Output "===================="
 
 	# Filter Screen Connect Devices
 	if ($SC_Company.GetType().Name -like "String") {
