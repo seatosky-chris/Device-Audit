@@ -2530,6 +2530,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						$New_UsageHistory.DaysActive.HistoryPercent[$Year_Month] = $DaysActivePercent
 					}
 					$New_UsageHistory.LastActive = ($MonthsUsage.Group | Sort-Object { $_.UseDateTime -as [DateTime] } -Descending | Select-Object -First 1).UseDateTime
+					$New_UsageHistory.UsersUsedBy | Foreach-Object {
+						$_.DaysActive.LastMonth = 0
+						$_.DaysActive.LastMonthPercent = 0
+					}
 	
 					# Update the UsersUsedBy array with usage stats for this computer on a per-user basis
 					$MonthsUsageByUser = $Monthly_UsageByComputerUser | Where-Object { $_.Name -like "*$ComputerID*" }
@@ -2626,6 +2630,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						$New_UsageHistory.DaysActive.HistoryPercent[$Year_Month] = $DaysActivePercent
 					}
 					$New_UsageHistory.LastActive = ($MonthsUsage.Group | Sort-Object { $_.UseDateTime -as [DateTime] } -Descending | Select-Object -First 1).UseDateTime
+					$New_UsageHistory.ComputersUsed | Foreach-Object {
+						$_.DaysActive.LastMonth = 0
+						$_.DaysActive.LastMonthPercent = 0
+					}
 	
 					# Update the ComputersUsed array with usage stats for this user on a per-computer basis
 					$MonthsUsageByComputer = $Monthly_UsageByComputerUser | Where-Object { $_.Name -like "*$UserID*" }
