@@ -2178,7 +2178,7 @@ if ($DOUsageDBSave) {
 				$User = $User | Select-Object Id, Domain, DomainOrLocal, Username, LastUpdated, type, O365Email, ITG_ID, ADUsername
 				$UserID = $User[0].Id
 				if (!$User.DomainOrLocal) {
-					$User.DomainOrLocal = if ($Domain) { "Domain" } else { "Local" }
+					$User.DomainOrLocal = if ($Domain -and $Domain -ne "WORKGROUP") { "Domain" } else { "Local" }
 					$User.Domain = $Domain
 					$User.LastUpdated = $Now_UTC
 					Set-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Users" -Id $UserID -DocumentBody ($User | ConvertTo-Json) -PartitionKey 'user' | Out-Null
