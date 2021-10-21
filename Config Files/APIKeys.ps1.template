@@ -4,6 +4,28 @@
 ### This file holds all API Keys that the script uses
 ##################################################################################################################
 
+# $ITGAPIKey
+#
+# An ITG Api key, password access not required
+# Not required but highly recommended, will update device location in ITG if setup
+#
+$ITGAPIKey = @{
+	Url = "https://api.itglue.com"
+	Key = ""
+}
+
+# $AutotaskAPIKey
+#
+# An Autotask Api key
+# Not required but highly recommended, will update device location in Autotask if setup
+#
+$AutotaskAPIKey = @{
+	Url = "https://webservices1.autotask.net/atservicesrest"
+	Username = ""
+	Key = ""
+	IntegrationCode = ""
+}
+
 # $DattoAPIKey
 #
 # Your Datto RMM API key details

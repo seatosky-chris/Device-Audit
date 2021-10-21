@@ -6,7 +6,7 @@
 . "$PSScriptRoot\Config Files\Global-Config.ps1" # Global Config
 . "$PSScriptRoot\Config Files\APIKeys.ps1" # API Keys
 
-. "$PSScriptRoot\Config Files\Config-STS.ps1" # Company config (CHANGE THIS)
+. "$PSScriptRoot\Config Files\Config-NL.ps1" # Company config (CHANGE THIS)
 #####################################################################
 
 # This line allows popup boxes to work
@@ -25,6 +25,9 @@ If (Get-Module -ListAvailable -Name "ImportExcel") {Import-module ImportExcel} E
 If (Get-Module -ListAvailable -Name "Az.Accounts") {Import-module Az.Accounts } Else { install-module Az.Accounts  -Force; import-module Az.Accounts }
 If (Get-Module -ListAvailable -Name "Az.Resources") {Import-module Az.Resources } Else { install-module Az.Resources  -Force; import-module Az.Resources }
 If (Get-Module -ListAvailable -Name "CosmosDB") {Import-module CosmosDB } Else { install-module CosmosDB  -Force; import-module CosmosDB }
+If (Get-Module -ListAvailable -Name "ITGlueAPI") {Import-module ITGlueAPI -Force} Else { install-module ITGlueAPI -Force; import-module ITGlueAPI -Force}
+If (Get-Module -ListAvailable -Name "AutotaskAPI") {Import-module AutotaskAPI -Force} Else { install-module AutotaskAPI -Force; import-module AutotaskAPI -Force}
+If (Get-Module -ListAvailable -Name "Subnet") {Import-module Subnet -Force} Else { install-module Subnet -Force; import-module Subnet -Force}
 
 # Connect to Azure
 if (Test-Path "$PSScriptRoot\Config Files\AzureServiceAccount.json") {
@@ -32,6 +35,27 @@ if (Test-Path "$PSScriptRoot\Config Files\AzureServiceAccount.json") {
 } else {
 	Connect-AzAccount
 	Save-AzContext -Path "$PSScriptRoot\Config Files\AzureServiceAccount.json"
+}
+
+# Connect to IT Glue
+$ITGConnected = $false
+if ($ITGAPIKey.Key) {
+	Add-ITGlueBaseURI -base_uri $ITGAPIKey.Url
+	Add-ITGlueAPIKey $ITGAPIKey.Key
+	$WANFilterID = (Get-ITGlueFlexibleAssetTypes -filter_name $WANFlexAssetName).data
+	$LANFilterID = (Get-ITGlueFlexibleAssetTypes -filter_name $LANFlexAssetName).data
+	$OverviewFilterID = (Get-ITGlueFlexibleAssetTypes -filter_name $OverviewFlexAssetName).data
+	$ITGConnected = $true
+}
+
+# Connect to Autotask
+$AutotaskConnected = $false
+if ($AutotaskAPIKey.Key) {
+	$Secret = ConvertTo-SecureString $AutotaskAPIKey.Key -AsPlainText -Force
+	$Creds = New-Object System.Management.Automation.PSCredential($AutotaskAPIKey.Username, $Secret)
+	Add-AutotaskAPIAuth -ApiIntegrationcode $AutotaskAPIKey.IntegrationCode -credentials $Creds
+	Add-AutotaskBaseURI -BaseURI $AutotaskAPIKey.Url
+	$AutotaskConnected = $true
 }
 
 if ($RMM_ID) {
@@ -48,6 +72,22 @@ if ($RMM_ID) {
 	$RMM_Devices = Get-DrmmSiteDevices $RMM_ID | Where-Object { $_.deviceClass -eq 'device' -and $_.deviceType.category -in @("Laptop", "Desktop", "Server") }
 } else {
 	$RMM_Devices = Import-Csv $RMM_CSV
+}
+
+# Get all devices from ITG
+$ITG_Devices = @()
+if ($ITGConnected -and $ITG_ID) {
+	$ITG_Devices = Get-ITGlueConfigurations -page_size 10000 -organization_id $ITG_ID
+	if ($ITG_Devices -and $ITG_Devices.data) {
+		$ITG_Devices = $ITG_Devices.data
+	}
+}
+
+# Get all devices from Autotask
+$Autotask_Devices = @()
+if ($AutotaskConnected -and $Autotask_ID) {
+	$Autotask_Devices = Get-AutotaskAPIResource -Resource ConfigurationItems -SimpleSearch "companyID eq $Autotask_ID"
+	$Autotask_Devices = $Autotask_Devices | Where-Object { $_.isActive -eq "True" }
 }
 
 # Get all devices from SC
@@ -216,7 +256,7 @@ if (!$RMM_ID) {
 	$RMM_Devices = $RMM_Devices | Where-Object { $_."Device Type" -in @("Laptop", "Desktop", "Server") } |
 							Select-Object "Device UID", "Device Hostname", "Serial Number", 
 											@{Name="MacAddresses"; E={ @(($_."MAC Address(es)" -replace "^\[", '' -replace "\]$", '' -split ', ') | ForEach-Object { @{macAddress = $_} }) }}, 
-											"Device Type", "Status", "Last Seen", 
+											"Device Type", "Status", "Last Seen", @{Name="extIpAddress"; E={$_."Ext IP Addr"}}, @{Name="intIpAddress"; E={$_."Int IP Address"}},
 											"Last User", Domain, "Operating System", Manufacturer, "Device Model", @{Name="Warranty Expiry"; E= {$_."Warranty Exp. Date"}}, "Device Description", 
 											@{Name="ScreenConnectID"; E={
 												if ($_.ScreenConnect -and $_.ScreenConnect -like "*$($SCLogin.URL.TrimStart('http').TrimStart('s').TrimStart('://'))*") {
@@ -231,6 +271,7 @@ if (!$RMM_ID) {
 	$RMM_Devices = $RMM_Devices |
 							Select-Object @{Name="Device UID"; E={$_.uid}}, @{Name="Device Hostname"; E={$_.hostname}}, @{Name="Serial Number"; E={$_.serialNumber}}, MacAddresses, 
 											@{Name="Device Type"; E={$_.deviceType.category}}, @{Name="Status"; E={$_.online}}, @{Name="Last Seen"; E={ if ($_.online -eq "True") { Get-Date } else { Convert-UTCtoLocal(([datetime]'1/1/1970').AddMilliseconds($_.lastSeen)) } }}, 
+											extIpAddress, intIpAddress,
 											@{Name="Last User"; E={$_.lastLoggedInUser}}, Domain, @{Name="Operating System"; E={$_.operatingSystem}}, 
 											Manufacturer, @{Name="Device Model"; E={$_.model}}, @{Name="Warranty Expiry"; E={$_.warrantyDate}}, @{Name="Device Description"; E={$_.description}}, 
 											@{Name="ScreenConnectID"; E={
@@ -278,11 +319,11 @@ foreach ($Device in $Sophos_Devices) {
 ##############
 
 # This function checks the force match array for any forced matches and returns them
-# Input the device ID and the $Type of connection (SC, RMM, or Sophos)
+# Input the device ID and the $Type of connection (SC, RMM, Sophos, or ITG)
 # Returns an array containing hashtables for each match with the matching connections type, and device id, and if we want to match with this id or ignore this id
-# @( @{"type" = "sc, rmm, or sophos", "id" = "device id or $false for no match", "match" = $true if we want to match to this ID, $false if we want to block matches with this id } )
+# @( @{"type" = "sc, rmm, sophos, or itg", "id" = "device id or $false for no match", "match" = $true if we want to match to this ID, $false if we want to block matches with this id } )
 function force_match($DeviceID, $Type) {
-	$Types = @("SC", "RMM", "Sophos")
+	$Types = @("SC", "RMM", "Sophos", "ITG")
 	if (!$Type -or $Type -notin $Types) {
 		return
 	}
@@ -394,6 +435,10 @@ foreach ($Device in $SC_Devices) {
 			rmm_hostname = @()
 			sophos_matches = @()
 			sophos_hostname = @()
+			itg_matches = @()
+			itg_hostname = @()
+			autotask_matches = @()
+			autotask_hostname = @()
 		}
 
 	} else {
@@ -405,6 +450,10 @@ foreach ($Device in $SC_Devices) {
 			rmm_hostname = @()
 			sophos_matches = @()
 			sophos_hostname = @()
+			itg_matches = @()
+			itg_hostname = @()
+			autotask_matches = @()
+			autotask_hostname = @()
 		}
 	}
 }
@@ -531,6 +580,10 @@ foreach ($Device in $RMM_Devices) {
 		rmm_hostname = @($Device."Device Hostname")
 		sophos_matches = @()
 		sophos_hostname = @()
+		itg_matches = @()
+		itg_hostname = @()
+		autotask_matches = @()
+		autotask_hostname = @()
 	}
 }
 
@@ -572,6 +625,10 @@ foreach ($Device in $Sophos_Devices) {
 				rmm_hostname = @()
 				sophos_matches = @($Device.id)
 				sophos_hostname = @($Device.hostname)
+				itg_matches = @()
+				itg_hostname = @()
+				autotask_matches = @()
+				autotask_hostname = @()
 			}
 		}
 		continue;
@@ -695,6 +752,206 @@ foreach ($Device in $Sophos_Devices) {
 				rmm_hostname = @()
 				sophos_matches = @($Device.id)
 				sophos_hostname = @($Device.hostname)
+				itg_matches = @()
+				itg_hostname = @()
+				autotask_matches = @()
+				autotask_hostname = @()
+			}
+		}
+	}
+}
+
+# Match devices to ITG
+if ($ITGConnected) {
+	foreach ($Device in $ITG_Devices) {
+		$RelatedDevices = @()
+
+		# ITG to RMM Matches
+		$Related_RMMDevices = @()
+		$Related_RMMDevices += ($RMM_Devices | Where-Object {
+			$Device.attributes.'asset-tag' -eq $_.'Device UID' -or 
+			$Device.attributes.name -like $_.'Device Hostname' -or 
+			($Device.attributes.hostname -like $_.'Device Hostname' -and $Device.attributes.hostname) -or 
+			$Device.attributes.name -like $_.'Device Description' -or 
+			($Device.attributes.hostname -like $_.'Device Description' -and $Device.attributes.hostname) -or 
+			($Device.attributes.'serial-number' -like $_.'Serial Number' -and $Device.attributes.'serial-number' -and $Device.attributes.'serial-number' -notin $IgnoreSerials -and $Device.attributes.'serial-number' -notlike "123456789*")
+		})
+
+		# Narrow down if more than 1 device found
+		if (($Related_RMMDevices | Measure-Object).Count -gt 1) {
+			$Related_RMMDevices_Filtered = $Related_RMMDevices | Where-Object { 
+				$Device.attributes.name -like $_.'Device Hostname' -and
+				$Device.attributes.'serial-number' -like $_.'Serial Number'
+			}
+			if (($Related_RMMDevices_Filtered | Measure-Object).Count -gt 0) {
+				$Related_RMMDevices = $Related_RMMDevices_Filtered
+			}
+		}
+		if (($Related_RMMDevices | Measure-Object).Count -gt 1) {
+			$Related_RMMDevices_Filtered = $Related_RMMDevices | Where-Object { 
+				$Device.attributes.'asset-tag' -eq $_.'Device UID'
+			}
+			if (($Related_RMMDevices_Filtered | Measure-Object).Count -gt 0) {
+				$Related_RMMDevices = $Related_RMMDevices_Filtered
+			}
+		}
+
+		# Get existing matches and connect
+		$Related_RMMDevices | ForEach-Object {
+			$RMM_DeviceID = $_."Device UID"
+			$RelatedDevices += ($MatchedDevices | Where-Object { $RMM_DeviceID -in $_.rmm_matches })
+		}
+
+
+		# ITG to SC Matches (fallback)
+		if (!$RelatedDevices) {
+			$Related_SCDevices = @()
+			$Related_SCDevices += ($SC_Devices | Where-Object {
+				$Device.attributes.name -like $_.Name -or 
+				($Device.attributes.hostname -like $_.Name -and $Device.attributes.hostname) -or 
+				$Device.attributes.name -like $_.GuestMachineName -or 
+				($Device.attributes.hostname -like $_.GuestMachineName -and $Device.attributes.hostname) -or 
+				($Device.attributes.'serial-number' -like $_.GuestMachineSerialNumber -and $Device.attributes.'serial-number' -and $Device.attributes.'serial-number' -notin $IgnoreSerials -and $Device.attributes.'serial-number' -notlike "123456789*")
+			})
+
+			# Narrow down if more than 1 device found
+			if (($Related_SCDevices | Measure-Object).Count -gt 1) {
+				$Related_SCDevices_Filtered = $Related_SCDevices | Where-Object { 
+					$Device.attributes.'serial-number' -like $_.GuestMachineSerialNumber
+				}
+				if (($Related_SCDevices_Filtered | Measure-Object).Count -gt 0) {
+					$Related_SCDevices = $Related_SCDevices_Filtered
+				}
+			}
+
+			# Get existing matches and connect
+			$Related_SCDevices | ForEach-Object {
+				$SC_DeviceID = $_.SessionID
+				$RelatedDevices += ($MatchedDevices | Where-Object { $SC_DeviceID -in $_.sc_matches })
+			}
+		}
+
+		# ITG to Sophos Matches (fallback)
+		if (!$RelatedDevices) {
+			$Related_SophosDevices = @()
+			$Related_SophosDevices += ($Sophos_Devices | Where-Object {
+				$Device.attributes.name -eq $_.hostname -or
+				($Device.attributes.hostname -eq $_.hostname -and $Device.attributes.hostname)
+			})
+
+			# If matching is for MacOS devices and multiple are found, skip matching
+			if (($Related_SophosDevices | Measure-Object).Count -gt 1 -and $Related_SophosDevices.OS -like "*macOS*") {
+				continue
+			}
+		}
+
+		$RelatedDevices = $RelatedDevices | Sort-Object id -Unique
+
+		# Got all related devices, updated $MatchedDevices
+		if (($RelatedDevices | Measure-Object).Count -gt 0) {
+			foreach ($MatchedDevice in $RelatedDevices) {
+				$MatchedDevice.itg_matches += @($Device.id)
+				$MatchedDevice.itg_hostname += @($Device.attributes.name)
+			}
+		}
+	}
+}
+
+# Match devices to Autotask
+if ($AutotaskConnected) {
+	foreach ($Device in $Autotask_Devices) {
+		$RelatedDevices = @()
+
+		# Autotask to RMM Matches
+		$Related_RMMDevices = @()
+		$Related_RMMDevices += ($RMM_Devices | Where-Object {
+			($Device.rmmDeviceUID -eq $_.'Device UID' -and $Device.rmmDeviceUID) -or 
+			($Device.referenceNumber -eq $_.'Device UID' -and $Device.referenceNumber) -or 
+			$Device.referenceTitle -like $_.'Device Hostname' -or 
+			($Device.rmmDeviceAuditHostname -like $_.'Device Hostname' -and $Device.rmmDeviceAuditHostname) -or 
+			($Device.serialNumber -like $_.'Serial Number' -and $Device.serialNumber -and $Device.serialNumber -notin $IgnoreSerials -and $Device.serialNumber -notlike "123456789*")
+		})
+
+		# Narrow down if more than 1 device found
+		if (($Related_RMMDevices | Measure-Object).Count -gt 1) {
+			$Related_RMMDevices_Filtered = $Related_RMMDevices | Where-Object { 
+				$Device.rmmDeviceUID -eq $_.'Device UID'
+			}
+			if (($Related_RMMDevices_Filtered | Measure-Object).Count -gt 0) {
+				$Related_RMMDevices = $Related_RMMDevices_Filtered
+			}
+		}
+		if (($Related_RMMDevices | Measure-Object).Count -gt 1) {
+			$Related_RMMDevices_Filtered = $Related_RMMDevices | Where-Object { 
+				$Device.referenceTitle -like $_.'Device Hostname' -and
+				$Device.serialNumber -like $_.'Serial Number'
+			}
+			if (($Related_RMMDevices_Filtered | Measure-Object).Count -gt 0) {
+				$Related_RMMDevices = $Related_RMMDevices_Filtered
+			}
+		}
+		if (($Related_RMMDevices | Measure-Object).Count -gt 1) {
+			$Related_RMMDevices_Filtered = $Related_RMMDevices | Where-Object { 
+				$Device.referenceNumber -eq $_.'Device UID'
+			}
+			if (($Related_RMMDevices_Filtered | Measure-Object).Count -gt 0) {
+				$Related_RMMDevices = $Related_RMMDevices_Filtered
+			}
+		}
+
+		# Get existing matches and connect
+		$Related_RMMDevices | ForEach-Object {
+			$RMM_DeviceID = $_."Device UID"
+			$RelatedDevices += ($MatchedDevices | Where-Object { $RMM_DeviceID -in $_.rmm_matches })
+		}
+
+		# Autotask to ITG Matches (fallback)
+		$Related_ITGDevices = @()
+		$Related_ITGDevices += ($ITG_Devices | Where-Object {
+			($Device.rmmDeviceUID -eq $_.attributes.'asset-tag' -and $Device.rmmDeviceUID) -or 
+			($Device.referenceNumber -eq $_.attributes.'asset-tag' -and $Device.referenceNumber) -or 
+			$Device.referenceTitle -like $_.attributes.name -or 
+			$Device.referenceTitle -like $_.attributes.hostname -or 
+			($Device.rmmDeviceAuditHostname -like $_.attributes.name -and $Device.rmmDeviceAuditHostname) -or 
+			($Device.rmmDeviceAuditHostname -like $_.attributes.hostname -and $Device.rmmDeviceAuditHostname) -or 
+			($Device.rmmDeviceAuditDescription -like $_.attributes.name -and $Device.rmmDeviceAuditDescription) -or 
+			($Device.rmmDeviceAuditDescription -like $_.attributes.hostname -and $Device.rmmDeviceAuditDescription) -or 
+			($Device.serialNumber -like $_.attributes.'serial-number' -and $Device.serialNumber -and $Device.serialNumber -notin $IgnoreSerials -and $Device.serialNumber -notlike "123456789*")
+		})
+
+		# Narrow down if more than 1 device found
+		if (($Related_ITGDevices | Measure-Object).Count -gt 1) {
+			$Related_ITGDevices_Filtered = $Related_ITGDevices | Where-Object { 
+				$Device.referenceTitle -like $_.attributes.name -and
+				$Device.serialNumber -like $_.attributes.'serial-number'
+			}
+			if (($Related_ITGDevices_Filtered | Measure-Object).Count -gt 0) {
+				$Related_ITGDevices = $Related_ITGDevices_Filtered
+			}
+		}
+		if (($Related_ITGDevices | Measure-Object).Count -gt 1) {
+			$Related_ITGDevices_Filtered = $Related_ITGDevices | Where-Object { 
+				$Device.rmmDeviceUID -eq $_.attributes.'asset-tag' -or
+				$Device.referenceNumber -eq $_.attributes.'asset-tag'
+			}
+			if (($Related_ITGDevices_Filtered | Measure-Object).Count -gt 0) {
+				$Related_ITGDevices = $Related_ITGDevices_Filtered
+			}
+		}
+
+		# Get existing matches and connect
+		$Related_ITGDevices | ForEach-Object {
+			$ITG_DeviceID = $_.id
+			$RelatedDevices += ($MatchedDevices | Where-Object { $ITG_DeviceID -in $_.itg_matches })
+		}
+
+		$RelatedDevices = $RelatedDevices | Sort-Object id -Unique
+
+		# Got all related devices, updated $MatchedDevices
+		if (($RelatedDevices | Measure-Object).Count -gt 0) {
+			foreach ($MatchedDevice in $RelatedDevices) {
+				$MatchedDevice.autotask_matches += @($Device.id)
+				$MatchedDevice.autotask_hostname += @($Device.referenceTitle)
 			}
 		}
 	}
@@ -702,7 +959,7 @@ foreach ($Device in $Sophos_Devices) {
 
 Write-Host "Matching Complete!"
 Write-Host "===================="
-$MatchedDevices | Select-Object id, @{N="sc_hostname"; E={$_.sc_hostname -join ', '}}, @{N="rmm_hostname"; E={$_.rmm_hostname -join ', '}}, @{N="sophos_hostname"; E={$_.sophos_hostname -join ', '}} | Out-GridView -PassThru -Title "Matched Devices"
+$MatchedDevices | Select-Object id, @{N="sc_hostname"; E={$_.sc_hostname -join ', '}}, @{N="rmm_hostname"; E={$_.rmm_hostname -join ', '}}, @{N="sophos_hostname"; E={$_.sophos_hostname -join ', '}}, @{N="itg_hostname"; E={$_.itg_hostname -join ', '}}, @{N="autotask_hostname"; E={$_.autotask_hostname -join ', '}} | Out-GridView -PassThru -Title "Matched Devices"
 
 # Get the existing log
 $LogFilePath = "$($LogLocation)\$($Company_Acronym)_log.json"
@@ -713,7 +970,7 @@ if ($LogLocation -and (Test-Path -Path $LogFilePath)) {
 }
 
 # Function for logging automated changes (installs, deletions, etc.)
-# $ServiceTarget is 'rmm', 'sc', or 'sophos'
+# $ServiceTarget is 'rmm', 'sc', 'sophos', 'itg', or 'autotask'
 function log_change($Company_Acronym, $ServiceTarget, $RMM_Device_ID, $SC_Device_ID, $Sophos_Device_ID, $ChangeType, $Hostname = "", $Reason = "") {
 	if (!$LogLocation) {
 		return $false
@@ -1056,6 +1313,24 @@ function delete_from_sophos($Sophos_Device_ID, $TenantApiHost, $SophosHeader) {
 		}
 	}
 	return $false
+}
+
+# Archives a configuration in ITG
+function archive_itg($ITG_Device_ID) {
+	$UpdatedConfig = @{
+		'type' = 'configurations'
+		'attributes' = @{
+			'archived' = 'true'
+		}
+	}
+
+	try {
+		Set-ITGlueConfigurations -id $ITG_Device_ID -data $UpdatedConfig
+		return $true
+	} catch {
+		Write-Error "Could not archive ITG configuration '$ITG_Device_ID' for the reason: " + $_.Exception.Message
+		return $false
+	}
 }
 
 
@@ -1685,6 +1960,7 @@ if ($DOInactiveSearch) {
 				$SCDeviceID = if ($ActivityComparison.sc) { $ActivityComparison.sc[0].id } else { $false }
 				$RMMDeviceID = if ($ActivityComparison.rmm) { $ActivityComparison.rmm[0].id } else { $false }
 				$SophosDeviceID = if ($ActivityComparison.sophos) { $ActivityComparison.sophos[0].id } else { $false }
+				$ITG_IDs = $Device.itg_matches
 
 				$User = $false
 				$OperatingSystem = $false
@@ -1774,6 +2050,20 @@ if ($DOInactiveSearch) {
 					}
 				}
 
+				$DeleteITG = "No"
+				if ($ITGConnected -and $ITG_IDs -and !$RMMOnly) {
+					if (!$ReadOnly) {
+						foreach ($ID in $ITG_IDs) {
+							$Deleted = archive_itg -ITG_Device_ID $ID
+							if ($Deleted) {
+								$DeleteITG = "Yes"
+								$ITG_Device = $ITG_Devices | Where-Object { $_.id -eq  $ID }
+								log_change -Company_Acronym $Company_Acronym -ServiceTarget "itg" -RMM_Device_ID $Device.rmm_matches -SC_Device_ID $Device.sc_matches -Sophos_Device_ID $Device.sophos_matches -ChangeType "delete" -Hostname $ITG_Device.attributes.name -Reason "Inactive"
+							}
+						}
+					}
+				}
+
 
 				$InactiveDevices += [PsCustomObject]@{
 					Hostnames = $Hostnames -join ', '
@@ -1788,6 +2078,7 @@ if ($DOInactiveSearch) {
 					DeleteSC = $DeleteSC
 					DeleteRMM = $DeleteRMM
 					DeleteSophos = $DeleteSophos
+					ArchiveITG = $DeleteITG
 					SC_Time = if ($ActivityComparison.sc) { $ActivityComparison.sc[0].last_active } else { "NA" }
 					RMM_Time = if ($ActivityComparison.rmm) { $ActivityComparison.rmm[0].last_active } else { "NA" }
 					Sophos_Time = if ($ActivityComparison.sophos) { $ActivityComparison.sophos[0].last_active } else { "NA" }
@@ -1808,6 +2099,53 @@ if ($DOInactiveSearch) {
 
 	Write-Host "Inactive devices check complete."
 	Write-Host "======================"
+}
+
+# If enabled, this will output a list of any inactive workstations in ITG for archival review (for initial audit for itg device documentation)
+if ($DOITGArchivalReview -and $ITGConnected) {
+	$PossiblyArchive = @()
+	$Now = Get-Date
+	foreach ($ITG_Device in $ITG_Devices) {
+		if ($ITG_Device.attributes.'configuration-type-kind' -notin @('laptop', 'workstation', 'server')) {
+			continue;
+		}
+		if ($ITG_Device.archived -eq "True") {
+			continue;
+		}
+
+		$MatchedDevice = $MatchedDevices | Where-Object { $ITG_Device.id -in $_.itg_matches } | Select-Object -First 1
+
+		if (!$MatchedDevice) {
+			$PossiblyArchive += [pscustomobject]@{
+				id = $ITG_Device.id
+				name = $ITG_Device.attributes.name
+				url = $ITG_Device.attributes.'resource-url'
+			}
+			continue
+		}
+
+		$ActivityComparison = compare_activity($MatchedDevice)
+		$Activity = $ActivityComparison.Values | Sort-Object last_active
+
+		if (($Activity | Measure-Object).count -gt 0) {
+			$NewestDate = [DateTime]($Activity.last_active | Sort-Object | Select-Object -Last 1)
+			$Timespan = New-TimeSpan -Start $NewestDate -End $Now
+			
+			if ($Timespan.Days -gt $InactiveDeleteDays) {
+				$PossiblyArchive += [pscustomobject]@{
+					id = $ITG_Device.id
+					name = $ITG_Device.attributes.name
+					url = $ITG_Device.attributes.'resource-url'
+				}
+			}
+		}
+	}
+
+	if ($PossiblyArchive) {
+		$PossiblyArchive | Out-GridView -PassThru -Title 'Devices flagged for possible archival in IT Glue'
+	} else {
+		Write-Host "No devices found that might need archival in IT Glue." -ForegroundColor Green
+	}
 }
 
 # Save each user and the computer(s) they are using into the Usage database (for user audits and documenting who uses each computer)
@@ -2749,6 +3087,708 @@ if ($DOBillingExport) {
 	}
 
 	Write-Host "Device list built."
+	Write-Host "======================"
+}
+
+# Update device locations in Autotask/IT Glue
+if ($DOUpdateDeviceLocations -and $ITGConnected -and $AutotaskConnected -and $ITG_ID -and $Autotask_ID) {
+	Write-Host "Updating device locations..."
+	$WANs = Get-ITGlueFlexibleAssets -page_size 1000 -filter_flexible_asset_type_id $WANFilterID.id -filter_organization_id $ITG_ID
+	$LANs = Get-ITGlueFlexibleAssets -page_size 1000 -filter_flexible_asset_type_id $LANFilterID.id -filter_organization_id $ITG_ID
+	$ITGLocations = Get-ITGlueLocations -org_id $ITG_ID
+	if ($OverviewFilterID) {
+		$CustomOverviews = Get-ITGlueFlexibleAssets -filter_flexible_asset_type_id $OverviewFilterID.id -filter_organization_id $ITG_ID
+		$WANCustomOverviews = $CustomOverviews.data | Where-Object { $_.attributes.name -like "WAN: *" }
+		$LANCustomOverviews = $CustomOverviews.data | Where-Object { $_.attributes.name -like "LAN: *" }
+	}
+	$AutotaskLocations = Get-AutotaskAPIResource -Resource CompanyLocations -SimpleSearch "companyID eq $Autotask_ID"
+	$AutotaskLocations = $AutotaskLocations | Where-Object { $_.isActive -eq "True" }
+	$IPRegex = "\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(-(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)?)?(\/[1-3][0-9])?\b"
+
+	if ($LANs -and $LANs.data) {
+		$LANs = $LANs.data
+	}
+
+	if ($WANs -and $WANs.data -and ($WANs.data | Measure-Object).Count -gt 0 -and $ITG_Devices -and $ITGLocations -and $AutotaskLocations) {
+		$WANs = $WANs.data
+		$ITGLocations = $ITGLocations.data
+
+		$LocationIPs = @()
+		$LANIPs = @{}
+
+		foreach ($Location in $ITGLocations) {
+			$LocationLANs = $LANs | Where-Object { $_.attributes.traits.'location-s'.values.id -contains $Location.id }
+			$LocationWANs = @()
+			$LocationWANs += $WANs | Where-Object { $_.attributes.traits.'location-s'.values.id -contains $Location.id }
+			if ($LocationLANs) {
+				$LocationWANs += $WANs | Where-Object { $_.id -in $LocationLANs.attributes.traits.'internet-wan'.values.id }	
+			}
+			$LocationWANs = $LocationWANs | Sort-Object -Unique
+
+			if (!$LocationWANs) {
+				continue
+			}
+
+			$IPs_Parsed = @()
+			foreach ($WAN in $LocationWANs) {
+				$IPAddressInfo = $WAN.attributes.traits.'ip-address-es'
+				$IPHTML = ""
+	
+				# Parse the html on the WAN page
+				if ($IPAddressInfo -like "*<table>*") {
+					$HTML = New-Object -Com "HTMLFile"
+					$HTML.IHTMLDocument2_write($IPAddressInfo)
+	
+					$TableData = $HTML.all | Where-Object { $_.tagname -eq 'td' }
+					$TableHeaders = $TableData | Where-Object { $_.innerHtml -like "*<strong>*</strong>*" }
+					$TableData = $TableData | Where-Object { $_.innerHtml -notlike "*<strong>*</strong>*" }
+	
+					$ColCount = $TableHeaders.Count
+					for ($i = 0; $i -le $TableData.count; $i++) {
+						$Column = $i % $ColCount
+						$Header = $TableHeaders[$Column].innerHTML
+						if ($Header -like "*DNS*" -or $Header -like "*Subnet*") {
+							continue
+						}
+						$IPHTML += "`n$($TableData[$i].innerHTML)"
+					}
+				} elseif ($IPAddressInfo -like "*:*") {
+					$IPHTML = $IPAddressInfo -replace "Subnet(<.*>)?:?(<.*>)? ?$IPRegex", '' -replace "DNS(<.*>)?:?(<.*>)? ?$IPRegex", ''
+				} else {
+					$IPHTML = $IPAddressInfo
+				}
+	
+				# Find all IP's in the html, parse ranges and masks if needed, then map them to their locations
+				$Matches = [RegEx]::Matches($IPHTML, $IPRegex)
+
+				if ($Matches -and $Matches.value) {
+					$IPs = @($Matches.Value)
+					foreach ($IP in $IPs) {
+						if ($IP -like "*-*" -and $IP -like "*/*") {
+							$IP = $IP -replace '(\/[1-3][0-9])$', ''
+						}
+						if ($IP -like "*-*") {
+							$IPRange = $IP -split '-'
+							$Octets = $IPRange[0] -split '\.'
+							$RangeFrom = $Octets[3]
+							$RangeTo = $IPRange[1]
+							$AllEndingOctets = $RangeFrom..$RangeTo
+	
+							foreach ($EndingOctet in $AllEndingOctets) {
+								$IPs_Parsed += "$($Octets[0]).$($Octets[1]).$($Octets[2]).$($EndingOctet)"
+							}
+						} elseif ($IP -like "*/*") {
+							$IPRange = Get-Subnet $IP
+							$IPs_Parsed += $IPRange.IPAddress.IPAddressToString
+							$IPRange.HostAddresses | ForEach-Object {
+								$IPs_Parsed += $_
+							}
+							$IPs_Parsed += $IPRange.BroadcastAddress.IPAddressToString
+						} else {
+							$IPs_Parsed += $IP
+						}
+					}
+				}
+			}
+
+			$InternalIPs = @()
+			$ValidLANs = @()
+			if ($LocationLANs) {
+				foreach ($LAN in $LocationLANs) {
+					if (!$LANIPs[$LAN.id]) {
+						$LANIPs[$LAN.id] = @()
+						$Subnets = $LAN.attributes.traits.subnet
+						$IPMatches = [RegEx]::Matches($Subnets, $IPRegex)
+
+						if ($IPMatches -and $IPMatches.value) {
+							$SubnetIPs = @($IPMatches.value)
+							foreach ($SubnetIP in $SubnetIPs) {
+								$IPSubnet = Get-Subnet $SubnetIP
+								$ValidLANs += $LAN.id
+								$IPSubnet.HostAddresses | ForEach-Object {
+									$LANIPs[$LAN.id] += $_
+									$InternalIPs += $_
+								}
+							}
+						}
+					} else {
+						$InternalIPs += $LANIPs[$LAN.id]
+					}
+				}
+			}
+			$ValidLANs = $ValidLANs | Select-Object -Unique
+
+			if (!$IPs_Parsed) {
+				continue
+			}
+			
+			$AutotaskLocation = $AutotaskLocations | Where-Object { $_.name -like $Location.attributes.name }
+			if (!$AutotaskLocation) {
+				$AutotaskLocation = $AutotaskLocations | Where-Object {
+					$_.address1 -like $Location.attributes.'address-1' -and
+					$_.address2 -like $Location.attributes.'address-2' -and
+					$_.city -like $Location.attributes.city -and
+					$_.postalCode -like $Location.attributes.'postal-code' -and
+					$_.state -like $Location.attributes.'region-name' -and
+					($_.phone -replace "[^0-9]") -like $Location.attributes.phone
+				}
+			}
+
+			$LocationIPs += [PSCustomObject]@{
+				ExternalIPs = $IPs_Parsed
+				InternalIPs = $InternalIPs
+				ITGLocation = $Location.id
+				AutotaskLocation = $AutotaskLocation.id
+				WANs = @($LocationWANs.id)
+				LANs = @($ValidLANs)
+			}
+		}
+
+		# Prep overview lists
+		$WANDevices = @{}
+		$LANDevices = @{}
+		foreach ($LocationInfo in $LocationIPs) {
+			foreach ($WAN in $LocationInfo.WANs) {
+				if (!$WANDevices[$WAN]) {
+					$WANDevices[$WAN] = @()
+				}
+			}
+			foreach ($LAN in $LocationInfo.LANs) {
+				if (!$LANDevices[$LAN]) {
+					$LANDevices[$LAN] = @()
+				}
+			}
+		}
+
+		# We have all the locations mapped to ip lists, lets go through the list of devices and determine each one's location
+		if ($LocationIPs) {
+			$i = 0
+			$MatchedDeviceCount = ($MatchedDevices | Measure-Object).Count
+			foreach ($MatchedDevice in $MatchedDevices) {
+				$i++
+				[int]$PercentComplete = ($i / $MatchedDeviceCount * 100)
+				$Hostname = @($MatchedDevice.sc_hostname + $MatchedDevice.rmm_hostname + $MatchedDevice.sophos_hostname + $MatchedDevice.itg_hostname + $MatchedDevice.autotask_hostname) | Select-Object -First 1
+				Write-Progress -Activity "Updating Device Locations" -PercentComplete $PercentComplete -Status ("Working - " + $PercentComplete + "% (Checking: $Hostname)")
+
+				if (!$MatchedDevice.itg_matches -or !$MatchedDevice.autotask_matches) {
+					continue
+				}
+
+				$RMMDevice = $RMM_Devices | Where-Object { $_.'Device UID' -in $MatchedDevice.rmm_matches }
+				if ($RMMDevice) {
+					$ExternalIP = @($RMMDevice.extIpAddress)
+					$InternalIP = @($RMMDevice.intIpAddress)
+				} else {
+					$AutotaskDevice = $Autotask_Devices | Where-Object { $_.id -in $MatchedDevice.autotask_matches }
+					$ExternalIP = @($AutotaskDevice.rmmDeviceAuditExternalIPAddress)
+					$InternalIP = @($AutotaskDevice.rmmDeviceAuditIPAddress)
+				}
+
+				if (!$ExternalIP) {
+					continue
+				}
+
+				$PossibleLocations = @()
+				$ExternalIP | ForEach-Object {
+					$IP = $_;
+					$PossibleLocations += $LocationIPs | Where-Object { $_.ExternalIPs -contains $IP }
+				}
+
+				if (($PossibleLocations.ITGLocation | Select-Object -Unique | Measure-Object).Count -gt 1) {
+					# if more than 1 possible location, try narrowing down by internal ip
+					$PossibleLocations_IntFiltered = @()
+					$InternalIP | ForEach-Object {
+						$IP = $_;
+						$PossibleLocations_IntFiltered += $PossibleLocations | Where-Object { $_.InternalIPs -contains $IP }
+					}
+					if (($PossibleLocations_IntFiltered | Measure-Object).Count -gt 0) {
+						$PossibleLocations = $PossibleLocations_IntFiltered
+					}
+				}
+
+				$PossibleLocations = $PossibleLocations | Where-Object { $_.AutotaskLocation }
+
+				if (!$PossibleLocations) {
+					continue
+				}
+				
+				# Populate WAN and LAN device lists for custom overviews
+				foreach ($ITG_DeviceID in $MatchedDevice.itg_matches) {
+					$ITGMatch = $ITG_Devices | Where-Object { $_.id -eq $ITG_DeviceID }
+
+					# If currently set location is in $PossibleLocations, use existing location
+					if ($ITGMatch.attributes.'location-id' -and $ITGMatch.attributes.'location-id' -in $PossibleLocations.Location) {
+						$ExistingLocation = $PossibleLocations | Where-Object { $ITGMatch.'location-id' -in $_.Location } | Select-Object -First 1
+						if ($ExistingLocation.WANs) {
+							foreach ($WAN_ID in $ExistingLocation.WANs) {
+								$WANDevices[$WAN_ID] += $MatchedDevice.id
+							}
+						}
+					} else {
+						# Otherwise use the newly chosen location
+						$NewLocation = $PossibleLocations | Select-Object -First 1
+						if ($NewLocation.WANs) {
+							foreach ($WAN_ID in $NewLocation.WANs) {
+								$WANDevices[$WAN_ID] += $MatchedDevice.id
+							}
+						}
+					}
+
+					# Populate LAN info if applicable
+					if ($InternalIP -in $PossibleLocations.InternalIPs) {
+						foreach ($LAN_ID in $PossibleLocations.LANs) {
+							$AllowedIPs = $LANIPs[$LAN_ID]
+							if ($InternalIP -in $AllowedIPs) {
+								$LANDevices[$LAN_ID] += $MatchedDevice.id
+								break
+							}
+						}
+					}
+				}
+
+				foreach ($Autotask_DeviceID in $MatchedDevice.autotask_matches) {
+					$AutotaskMatch = $Autotask_Devices | Where-Object { $_.id -eq $Autotask_DeviceID }
+					# If currently set location is in $PossibleLocations, dont update
+					if ($AutotaskMatch.companyLocationID -in $PossibleLocations.AutotaskLocation) {
+						continue
+					}
+
+					# Update location
+					Write-Progress -Activity "Updating Device Locations" -PercentComplete $PercentComplete -Status ("Working - " + $PercentComplete + "% (Updating: $Hostname)")
+					$NewLocation = $PossibleLocations | Select-Object -First 1 # if multiple, just use the first
+
+					$ConfigurationUpdate = 
+					[PSCustomObject]@{
+						id = $Autotask_DeviceID
+						companyLocationID = $NewLocation.AutotaskLocation
+					}
+
+					Set-AutotaskAPIResource -Resource ConfigurationItems -ID $Autotask_DeviceID -body $ConfigurationUpdate | Out-Null
+				}
+			}
+			Write-Progress -Activity "Updating Device Locations" -Status "Ready" -Completed
+		}
+
+		if ($WAN_LAN_HistoryLocation) {
+			if (!(Test-Path -Path $WAN_LAN_HistoryLocation)) {
+				New-Item -ItemType Directory -Force -Path $WAN_LAN_HistoryLocation | Out-Null
+			}
+		}
+
+		# Create custom WAN & LAN overviews
+		if ($WANDevices) {
+			foreach ($WAN_ID in $WANDevices.keys) {
+				$WAN = $WANs | Where-Object { $_.id -eq $WAN_ID }
+				$Title = "WAN: Seen Devices - $($WAN.attributes.traits.label)"
+				$ExistingOverview = $WANCustomOverviews | Where-Object { $_.attributes.traits.label -like $Title -or $_.attributes.traits.overview -like "*WAN ID: '$WAN_ID'*" } | Select-Object -First 1
+				$DeviceTable = @()
+				$DeviceHistory = @()
+
+				# Get previously seen devices first
+				$HistoryPath = "$($WAN_LAN_HistoryLocation)\$($Company_Acronym)_wan_$($WAN_ID)_history.json"
+				if (Test-Path $HistoryPath) {
+					$PreviousWANHistory = $true
+					$DevicePreviousHistory = Get-Content -Path $HistoryPath -Raw | ConvertFrom-Json
+				}
+
+				# get list of recently seen devices
+				foreach ($MatchID in $WANDevices.Item($WAN_ID)) {
+					$MatchedDevice = $MatchedDevices | Where-Object { $_.id -eq $MatchID }
+					$Hostname = @($MatchedDevice.sc_hostname + $MatchedDevice.rmm_hostname + $MatchedDevice.sophos_hostname + $MatchedDevice.itg_hostname + $MatchedDevice.autotask_hostname) | Select-Object -First 1
+					$ITG_DeviceID = $null
+					if (($MatchedDevice.itg_matches | Measure-Object).Count -gt 0) {
+						$ITG_Device = $ITG_Devices | Where-Object { $_.id -eq ($MatchedDevice.itg_matches | Select-Object -First 1) }
+						$HostnameAndURL = "<a href='$($ITG_Device.attributes.'resource-url')'>$Hostname</a>"
+						$ITG_DeviceID = $ITG_Device.id
+					}
+
+					if ($PreviousWANHistory -and ($Hostname -in $DevicePreviousHistory -or ($ITG_DeviceID -and $ITG_DeviceID -in $DevicePreviousHistory.DeviceID))) {
+						# Remove devices from previously seen if in current list
+						$DevicePreviousHistory = $DevicePreviousHistory | Where-Object { $_.DeviceName -notlike $Hostname }
+						if ($ITG_DeviceID) {
+							$DevicePreviousHistory = $DevicePreviousHistory | Where-Object { $_.DeviceID -ne $ITG_DeviceID }
+						}
+					}
+
+					if ($Hostname -in $DeviceHistory.DeviceName) {
+						continue
+					}
+
+					$ActivityComparison = compare_activity($MatchedDevice)
+					$Activity = $ActivityComparison.Values | Sort-Object last_active
+					$LastSeen = ''
+					if (($Activity | Measure-Object).count -gt 1) {
+						$LastIndex = ($Activity | Measure-Object).count-1
+						$LastSeen = [DateTime]($Activity.last_active | Sort-Object | Select-Object -Last 1)
+					}
+
+					$Row = [PSCustomObject]@{
+						'DeviceName' = $Hostname
+						'Device' = $HostnameAndURL
+						'Last Seen' = $LastSeen
+					}
+					$DeviceTable += $Row
+
+					$DeviceHistory += [PSCustomObject]@{
+						'DeviceID' = $ITG_DeviceID
+						'DeviceName' = $Hostname
+						'LastSeen' = $LastSeen.ToUniversalTime()
+						'Type' = 'Current'
+					}
+				}
+
+				if (!$DeviceTable) {
+					$DeviceTable = "None seen yet."
+					$Overview = "<p>None seen yet.</p>"
+				} else {
+					$DeviceTable = ($DeviceTable | Sort-Object -Property  @{expression = 'Last Seen'; descending = $true}, @{expression = 'DeviceName'; descending = $false})
+					$Overview = $DeviceTable | Select-Object 'Device', 'Last Seen' | ConvertTo-Html -Fragment
+				}
+
+				# Create previous device history table
+				if ($PreviousWANHistory -and ($DevicePreviousHistory | Measure-Object).Count -gt 0) {
+					$DeviceHistoryTable = @()
+					foreach ($Device in $DevicePreviousHistory) {
+						if ($Device.DeviceID) {
+							$MatchedDevice = $MatchedDevices | Where-Object { $_.itg_matches -contains $Device.DeviceID } | Select-Object -First 1
+						} else {
+							$MatchedDevice = $MatchedDevices | Where-Object { $_.itg_hostname -contains $Device.DeviceName } | Select-Object -First 1
+						}
+
+						if (!$MatchedDevice) {
+							continue
+						}
+
+						$Hostname = @($MatchedDevice.sc_hostname + $MatchedDevice.rmm_hostname + $MatchedDevice.sophos_hostname + $MatchedDevice.itg_hostname + $MatchedDevice.autotask_hostname) | Select-Object -First 1
+						$ITG_Device = $ITG_Devices | Where-Object { $_.id -eq ($MatchedDevice.itg_matches | Select-Object -First 1) }
+						$HostnameAndURL = "<a href='$($ITG_Device.attributes.'resource-url')'>$Hostname</a>"
+
+						if ($Hostname -in $DeviceHistory.DeviceName -or ($Device.DeviceID -and $Device.DeviceID -in $DeviceHistory.DeviceID)) {
+							continue
+						}
+
+						$Row = [PSCustomObject]@{
+							'DeviceName' = $Hostname
+							'Device' = $HostnameAndURL
+							'Last Seen' = $Device.LastSeen.ToLocalTime()
+						}
+						$DeviceHistoryTable += $Row
+
+						$DeviceHistory += [PSCustomObject]@{
+							'DeviceID' = $ITG_Device.id
+							'DeviceName' = $Hostname
+							'LastSeen' = $Device.LastSeen
+							'Type' = 'Previous'
+						}
+					}
+					$DeviceHistoryTable = ($DeviceHistoryTable | Sort-Object -Property  @{expression = 'Last Seen'; descending = $true}, @{expression = 'DeviceName'; descending = $false})
+
+					if ($DeviceHistoryTable) {
+						$Overview += "`n`n<h3>Previously Seen Devices</h3> `n"
+						$Overview += $DeviceHistoryTable | Select-Object 'Device', 'Last Seen' | ConvertTo-Html -Fragment
+					}
+				}
+
+				$Overview += "`n<p>WAN ID: '$WAN_ID'</p>"
+
+				# Export devices to json file so we can track devices seen previously in this WAN
+				if ($WAN_LAN_HistoryLocation) {
+					$HistoryPath = "$($WAN_LAN_HistoryLocation)\$($Company_Acronym)_wan_$($WAN_ID)_history.json"
+					$DeviceHistory | ConvertTo-Json | Out-File -FilePath $HistoryPath
+					Write-Host "Exported the wan device history: $($WAN.attributes.traits.label)."
+				}
+
+				if ($ExistingOverview) {
+					# Update existing in ITG
+					$FlexAssetBody = 
+					@{
+						type = 'flexible-assets'
+						attributes = @{
+							traits = @{
+								"name" = $Title
+								"overview" = [System.Web.HttpUtility]::HtmlDecode($Overview)
+							}
+						}
+					}
+					Set-ITGlueFlexibleAssets -id $ExistingOverview.id -data $FlexAssetBody
+					$OverviewID = $ExistingOverview.id
+					$ExistingOverview = Get-ITGlueFlexibleAssets -id $OverviewID -include related_items
+				} else {
+					# Upload new to ITG
+					$FlexAssetBody = 
+					@{
+						type = 'flexible-assets'
+						attributes = @{
+							'organization-id' = $ITG_ID
+							'flexible-asset-type-id' = $OverviewFilterID.id
+							traits = @{
+								"name" = $Title
+								"overview" = [System.Web.HttpUtility]::HtmlDecode($Overview)
+							}
+						}
+					}
+					$New_WANOverview = New-ITGlueFlexibleAssets -organization_id $ITG_ID -data $FlexAssetBody
+					$OverviewID = $New_WANOverview.data.id
+				}
+
+				# Add related items
+				$RelatedItemsBody = @()
+				$RelatedItemsBody +=
+				@{
+					type = 'related_items'
+					attributes = @{
+						'destination_id' = $WAN_ID
+						'destination_type' = "Flexible Asset"
+					}
+				}
+				foreach ($Device in $DeviceHistory) {
+					$ITG_Device = $ITG_Devices | Where-Object { $_.id -eq $Device.DeviceID }
+
+					$Note = ''
+					if ($Device.Type -eq 'Current') {
+						$Note = 'Current WAN'
+					} else {
+						$Note = 'Previously seen on WAN'
+					}
+
+					if ($ExistingOverview.included -and $ITG_Device.id -in $ExistingOverview.included.attributes.'resource-id') {
+						$RelatedItem = $ExistingOverview.included | Where-Object { $_.attributes.'resource-id' -contains $ITG_Device.id }
+						if ($RelatedItem.attributes.notes -like $Note) {
+							continue
+						} else {
+							# Update related item
+							$Delete_RelatedItemsBody = @()
+							$RelatedItem.id | ForEach-Object {
+								$Delete_RelatedItemsBody +=
+								@{
+									type = 'related_items'
+									attributes = @{
+										'id' = $_
+									}
+								}
+							}
+							Remove-ITGlueRelatedItems -resource_type 'flexible_assets' -resource_id $OverviewID -data $Delete_RelatedItemsBody
+						}
+					}
+
+					if ($ITG_Device -and $ITG_Device.id) {
+						$RelatedItemsBody +=
+						@{
+							type = 'related_items'
+							attributes = @{
+								'destination_id' = $ITG_Device.id
+								'destination_type' = "Configuration"
+								'notes' = $Note
+							}
+						}
+					}
+				}
+
+				New-ITGlueRelatedItems -resource_type 'flexible_assets' -resource_id $OverviewID -data $RelatedItemsBody
+			}
+		}
+
+		if ($LANDevices) {
+			foreach ($LAN_ID in $LANDevices.keys) {
+				$LAN = $LANs | Where-Object { $_.id -eq $LAN_ID }
+				$Title = "LAN: Seen Devices - $($LAN.attributes.traits.name)"
+				$ExistingOverview = $LANCustomOverviews | Where-Object { $_.attributes.traits.name -like $Title -or $_.attributes.traits.overview -like "*LAN ID: '$LAN_ID'*" } | Select-Object -First 1
+				$DeviceTable = @()
+				$DeviceHistory = @()
+
+				# Get previously seen devices first
+				$HistoryPath = "$($WAN_LAN_HistoryLocation)\$($Company_Acronym)_lan_$($LAN_ID)_history.json"
+				if (Test-Path $HistoryPath) {
+					$PreviousLANHistory = $true
+					$DevicePreviousHistory = Get-Content -Path $HistoryPath -Raw | ConvertFrom-Json
+				}
+
+				# get list of recently seen devices
+				foreach ($MatchID in $LANDevices.Item($LAN_ID)) {
+					$MatchedDevice = $MatchedDevices | Where-Object { $_.id -eq $MatchID }
+					$Hostname = @($MatchedDevice.sc_hostname + $MatchedDevice.rmm_hostname + $MatchedDevice.sophos_hostname + $MatchedDevice.itg_hostname + $MatchedDevice.autotask_hostname) | Select-Object -First 1
+					$ITG_DeviceID = $null
+					if (($MatchedDevice.itg_matches | Measure-Object).Count -gt 0) {
+						$ITG_Device = $ITG_Devices | Where-Object { $_.id -eq ($MatchedDevice.itg_matches | Select-Object -First 1) }
+						$HostnameAndURL = "<a href='$($ITG_Device.attributes.'resource-url')'>$Hostname</a>"
+						$ITG_DeviceID = $ITG_Device.id
+					}
+
+					if ($PreviousLANHistory -and ($Hostname -in $DevicePreviousHistory -or ($ITG_DeviceID -and $ITG_DeviceID -in $DevicePreviousHistory.DeviceID))) {
+						# Remove devices from previously seen if in current list
+						$DevicePreviousHistory = $DevicePreviousHistory | Where-Object { $_.DeviceName -notlike $Hostname }
+						if ($ITG_DeviceID) {
+							$DevicePreviousHistory = $DevicePreviousHistory | Where-Object { $_.DeviceID -ne $ITG_DeviceID }
+						}
+					}
+
+					if ($Hostname -in $DeviceHistory.DeviceName) {
+						continue
+					}
+
+					$ActivityComparison = compare_activity($MatchedDevice)
+					$Activity = $ActivityComparison.Values | Sort-Object last_active
+					$LastSeen = ''
+					if (($Activity | Measure-Object).count -gt 1) {
+						$LastIndex = ($Activity | Measure-Object).count-1
+						$LastSeen = [DateTime]($Activity.last_active | Sort-Object | Select-Object -Last 1)
+					}
+
+					$Row = [PSCustomObject]@{
+						'DeviceName' = $Hostname
+						'Device' = $HostnameAndURL
+						'Last Seen' = $LastSeen
+					}
+					$DeviceTable += $Row
+
+					$DeviceHistory += [PSCustomObject]@{
+						'DeviceID' = $ITG_DeviceID
+						'DeviceName' = $Hostname
+						'LastSeen' = $LastSeen.ToUniversalTime()
+						'Type' = 'Current'
+					}
+				}
+
+				if (!$DeviceTable) {
+					$DeviceTable = "None seen yet."
+					$Overview = "<p>None seen yet.</p>"
+				} else {
+					$DeviceTable = ($DeviceTable | Sort-Object -Property  @{expression = 'Last Seen'; descending = $true}, @{expression = 'DeviceName'; descending = $false})
+					$Overview = $DeviceTable | Select-Object 'Device', 'Last Seen' | ConvertTo-Html -Fragment
+				}
+
+				# Create previous device history table
+				if ($PreviousLANHistory -and ($DevicePreviousHistory | Measure-Object).Count -gt 0) {
+					$DeviceHistoryTable = @()
+					foreach ($Device in $DevicePreviousHistory) {
+						if ($Device.DeviceID) {
+							$MatchedDevice = $MatchedDevices | Where-Object { $_.itg_matches -contains $Device.DeviceID } | Select-Object -First 1
+						} else {
+							$MatchedDevice = $MatchedDevices | Where-Object { $_.itg_hostname -contains $Device.DeviceName } | Select-Object -First 1
+						}
+
+						if (!$MatchedDevice) {
+							continue
+						}
+
+						$Hostname = @($MatchedDevice.sc_hostname + $MatchedDevice.rmm_hostname + $MatchedDevice.sophos_hostname + $MatchedDevice.itg_hostname + $MatchedDevice.autotask_hostname) | Select-Object -First 1
+						$ITG_Device = $ITG_Devices | Where-Object { $_.id -eq ($MatchedDevice.itg_matches | Select-Object -First 1) }
+						$HostnameAndURL = "<a href='$($ITG_Device.attributes.'resource-url')'>$Hostname</a>"
+
+						if ($Hostname -in $DeviceHistory.DeviceName -or ($Device.DeviceID -and $Device.DeviceID -in $DeviceHistory.DeviceID)) {
+							continue
+						}
+
+						$Row = [PSCustomObject]@{
+							'DeviceName' = $Hostname
+							'Device' = $HostnameAndURL
+							'Last Seen' = $Device.LastSeen.ToLocalTime()
+						}
+						$DeviceHistoryTable += $Row
+
+						$DeviceHistory += [PSCustomObject]@{
+							'DeviceID' = $ITG_Device.id
+							'DeviceName' = $Hostname
+							'LastSeen' = $Device.LastSeen
+							'Type' = 'Previous'
+						}
+					}
+					$DeviceHistoryTable = ($DeviceHistoryTable | Sort-Object -Property  @{expression = 'Last Seen'; descending = $true}, @{expression = 'DeviceName'; descending = $false})
+
+					if ($DeviceHistoryTable) {
+						$Overview += "`n`n<h3>Previously Seen Devices</h3> `n"
+						$Overview += $DeviceHistoryTable | Select-Object 'Device', 'Last Seen' | ConvertTo-Html -Fragment
+					}
+				}
+
+				$Overview += "`n<p>LAN ID: '$LAN_ID'</p>"
+
+				# Export devices to json file so we can track devices seen previously in this WAN
+				if ($WAN_LAN_HistoryLocation) {
+					$HistoryPath = "$($WAN_LAN_HistoryLocation)\$($Company_Acronym)_lan_$($LAN_ID)_history.json"
+					$DeviceHistory | ConvertTo-Json | Out-File -FilePath $HistoryPath
+					Write-Host "Exported the lan device history: $($LAN.attributes.traits.name)."
+				}
+
+				if ($ExistingOverview) {
+					# Update existing in ITG
+					$FlexAssetBody = 
+					@{
+						type = 'flexible-assets'
+						attributes = @{
+							traits = @{
+								"name" = $Title
+								"overview" = [System.Web.HttpUtility]::HtmlDecode($Overview)
+							}
+						}
+					}
+					Set-ITGlueFlexibleAssets -id $ExistingOverview.id -data $FlexAssetBody
+					$OverviewID = $ExistingOverview.id
+					$ExistingOverview = Get-ITGlueFlexibleAssets -id $OverviewID -include related_items
+				} else {
+					# Upload new to ITG
+					$FlexAssetBody = 
+					@{
+						type = 'flexible-assets'
+						attributes = @{
+							'organization-id' = $ITG_ID
+							'flexible-asset-type-id' = $OverviewFilterID.id
+							traits = @{
+								"name" = $Title
+								"overview" = [System.Web.HttpUtility]::HtmlDecode($Overview)
+							}
+						}
+					}
+					$New_LANOverview = New-ITGlueFlexibleAssets -organization_id $ITG_ID -data $FlexAssetBody
+					$OverviewID = $New_LANOverview.data.id
+				}
+		
+				# Add related items
+				$RelatedItemsBody = @()
+				$RelatedItemsBody +=
+				@{
+					type = 'related_items'
+					attributes = @{
+						'destination_id' = $LAN_ID
+						'destination_type' = "Flexible Asset"
+					}
+				}
+				foreach ($Device in $DeviceHistory) {
+					$ITG_Device = $ITG_Devices | Where-Object { $_.id -eq $Device.DeviceID }
+
+					$Note = ''
+					if ($Device.Type -eq 'Current') {
+						$Note = 'Current LAN'
+					} else {
+						$Note = 'Previously seen on LAN'
+					}
+
+					if ($ExistingOverview.included -and $ITG_Device.id -in $ExistingOverview.included.attributes.'resource-id') {
+						$RelatedItem = $ExistingOverview.included | Where-Object { $_.attributes.'resource-id' -contains $ITG_Device.id }
+						if ($RelatedItem.attributes.notes -like $Note) {
+							continue
+						}
+					}
+
+					if ($ITG_Device -and $ITG_Device.id) {
+						$RelatedItemsBody +=
+						@{
+							type = 'related_items'
+							attributes = @{
+								'destination_id' = $ITG_Device.id
+								'destination_type' = "Configuration"
+								'notes' = $Note
+							}
+						}
+					}
+				}
+
+				New-ITGlueRelatedItems -resource_type 'flexible_assets' -resource_id $OverviewID -data $RelatedItemsBody
+			}
+		}
+	}
+
+	Write-Host "Device locations updated."
 	Write-Host "======================"
 }
 

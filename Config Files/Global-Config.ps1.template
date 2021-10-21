@@ -15,6 +15,35 @@
 #
 $UsernameBlacklist = @("Administrator", "Admin", "User", "root", "Guest")
 
+####################
+# $WANFlexAssetName
+#
+# The ITG flexible asset name that holds Internet / WAN information
+# specifically including external IP's and their associated location(s)
+#
+# Example: $WANFlexAssetName = "Internet / WAN"
+#
+$WANFlexAssetName = "Internet / WAN"
+
+####################
+# $LANFlexAssetName
+#
+# The ITG flexible asset name that holds LAN information
+# specifically including internal IP's and their associated location(s)
+#
+# Example: $LANFlexAssetName = "LAN"
+#
+$LANFlexAssetName = "LAN"
+
+####################
+# $OverviewFlexAssetName
+#
+# The ITG flexible asset name for creating custom overviews
+#
+# Example: $OverviewFlexAssetName = "Custom Overview"
+#
+$OverviewFlexAssetName = "Custom Overview"
+
 ##################################################################################################################
 ##############################################  EXPORT LOCATIONS  ################################################
 ##################################################################################################################
@@ -103,6 +132,15 @@ $HistoryLocation = "C:\Users\Administrator\Documents\DeviceAuditHistory"
 # Example: $LogLocation = "C:\Users\Administrator\Documents\DeviceAuditLogs"
 #
 $LogLocation = "C:\Users\Administrator\Documents\Device Audit\Logs"
+
+####################
+# $WAN_LAN_HistoryLocation
+#
+# The location to store previous devices found in each WAN / LAN
+#
+# Example: $WAN_LAN_HistoryLocation = "C:\Users\Administrator\Documents\WAN_LAN_History"
+#
+$WAN_LAN_HistoryLocation = "C:\Users\cjantzen\Documents\Powershell Scripts\IT Glue\Device Audit\WAN_LAN_History"
 
 ####################
 # $EmailFrom

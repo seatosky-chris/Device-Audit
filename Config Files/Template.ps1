@@ -76,6 +76,28 @@ $Sophos_Company =  ""
 #
 $SC_Company =  @()
 
+####################
+# $ITG_ID
+#
+# The ID of the company in IT Glue.
+# This is used to update WAN / LAN overviews in ITG. $Autotask_ID must also be set.
+#
+# Example: "1137359"
+#
+$ITG_ID = ""
+
+####################
+# $Autotask_ID
+#
+# The ID of the company in Autotask.
+# This is used to update device locations in Autotask. $ITG_ID must also be set.
+#
+# Example: "24567446"
+#
+$Autotask_ID = ""
+
+
+
 
 ##################################################################################################################
 ###############################################  COMPANY ACRONYMS  ###############################################
@@ -199,7 +221,7 @@ $InactiveAutoDeleteSophos = 365
 #
 # After how many days inactive will we ignore a device (for billing purposes?)
 #
-$InactiveBillingDays =  30
+$InactiveBillingDays = 30
 
 # $BrokenThreshold
 #
@@ -256,6 +278,12 @@ $DOUsageDBSave = $true
 # Export a list of devices for billing purposes (any device not seen within the last $InactiveBillingDays will be listed as unbilled)
 #
 $DOBillingExport = $true
+
+# $DOUpdateDeviceLocations
+#
+# Update the location of devices in ITG/Autotask and update the WAN/LAN overviews
+#
+$DOUpdateDeviceLocations = $true
 
 
 ##################################################################################################################
