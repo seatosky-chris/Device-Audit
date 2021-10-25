@@ -136,8 +136,11 @@ if (!$Response) {
 $Response = Invoke-WebRequest "$($SCLogin.URL)/Report.csv?ReportType=Session&SelectFields=SessionID&SelectFields=Name&SelectFields=GuestMachineName&SelectFields=GuestMachineSerialNumber&SelectFields=GuestHardwareNetworkAddress&SelectFields=GuestOperatingSystemName&SelectFields=GuestLastActivityTime&SelectFields=GuestInfoUpdateTime&SelectFields=GuestLastBootTime&SelectFields=GuestLoggedOnUserName&SelectFields=GuestLoggedOnUserDomain&SelectFields=GuestMachineManufacturerName&SelectFields=GuestMachineModel&SelectFields=GuestMachineDescription&SelectFields=CustomProperty1&Filter=SessionType%20%3D%20'Access'%20AND%20NOT%20IsEnded&AggregateFilter=&ItemLimit=100000" -WebSession $SCWebSession
 $SC_Devices_Full = $Response.Content | ConvertFrom-Csv
 
-if (!$SC_Devices_Full) {
+if (!$SC_Devices_Full -or ($SC_Devices_Full | Measure-Object).Count -lt 100 -or ($SC_Devices_Full | Measure-Object).Count -gt 3000) {
 	Write-PSFMessage -Level Error -Message "Failed to get: Device List from ScreenConnect"
+	Write-PSFMessage -Level Error -Message "Nonce: $Nonce"
+	Write-PSFMessage -Level Error -Message "FormBody: $FormBody"
+	Write-PSFMessage -Level Error -Message "URL attempted: $($SCLogin.URL)/Services/AuthenticationService.ashx/TryLogin"
 }
 
 # Function to convert imported UTC date/times to local time for easier comparisons
@@ -2326,53 +2329,6 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 		Write-Host "Inactive devices check complete."
 		Write-Host "======================"
-	}
-
-	# If enabled, this will output a list of any inactive workstations in ITG for archival review (for initial audit for itg device documentation)
-	if ($DOITGArchivalReview -and $ITGConnected) {
-		$PossiblyArchive = @()
-		$Now = Get-Date
-		foreach ($ITG_Device in $ITG_Devices) {
-			if ($ITG_Device.attributes.'configuration-type-kind' -notin @('laptop', 'workstation', 'server')) {
-				continue;
-			}
-			if ($ITG_Device.archived -eq "True") {
-				continue;
-			}
-
-			$MatchedDevice = $MatchedDevices | Where-Object { $ITG_Device.id -in $_.itg_matches } | Select-Object -First 1
-
-			if (!$MatchedDevice) {
-				$PossiblyArchive += [pscustomobject]@{
-					id = $ITG_Device.id
-					name = $ITG_Device.attributes.name
-					url = $ITG_Device.attributes.'resource-url'
-				}
-				continue
-			}
-
-			$ActivityComparison = compare_activity($MatchedDevice)
-			$Activity = $ActivityComparison.Values | Sort-Object last_active
-
-			if (($Activity | Measure-Object).count -gt 0) {
-				$NewestDate = [DateTime]($Activity.last_active | Sort-Object | Select-Object -Last 1)
-				$Timespan = New-TimeSpan -Start $NewestDate -End $Now
-				
-				if ($Timespan.Days -gt $InactiveDeleteDays) {
-					$PossiblyArchive += [pscustomobject]@{
-						id = $ITG_Device.id
-						name = $ITG_Device.attributes.name
-						url = $ITG_Device.attributes.'resource-url'
-					}
-				}
-			}
-		}
-
-		if ($PossiblyArchive) {
-			$PossiblyArchive | Out-GridView -PassThru -Title 'Devices flagged for possible archival in IT Glue'
-		} else {
-			Write-Host "No devices found that might need archival in IT Glue." -ForegroundColor Green
-		}
 	}
 
 	# Save each user and the computer(s) they are using into the Usage database (for user audits and documenting who uses each computer)
