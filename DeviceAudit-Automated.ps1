@@ -138,9 +138,8 @@ $SC_Devices_Full = $Response.Content | ConvertFrom-Csv
 
 if (!$SC_Devices_Full -or ($SC_Devices_Full | Measure-Object).Count -lt 100 -or ($SC_Devices_Full | Measure-Object).Count -gt 3000) {
 	Write-PSFMessage -Level Error -Message "Failed to get: Device List from ScreenConnect"
-	Write-PSFMessage -Level Error -Message "Nonce: $Nonce"
-	Write-PSFMessage -Level Error -Message "FormBody: $FormBody"
-	Write-PSFMessage -Level Error -Message "URL attempted: $($SCLogin.URL)/Services/AuthenticationService.ashx/TryLogin"
+	Write-PSFMessage -Level Error -Message "Response: $($Response | ConvertTo-Json)"
+	Write-PSFMessage -Level Error -Message "SC_Devices_Full: $($SC_Devices_Full | ConvertTo-Json)"
 }
 
 # Function to convert imported UTC date/times to local time for easier comparisons
@@ -266,15 +265,23 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	###########
 
 	# Get RMM devices
-	$Response = Set-DrmmApiParameters -Url $DattoAPIKey.URL -Key $DattoAPIKey.Key -SecretKey $DattoAPIKey.SecretKey 6>&1
-	if ($RMM_ID) {
-		if ($RMM_ID -match "^\d+$") {
-			$CompanyInfo = Get-DrmmAccountSites | Where-Object { $_.id -eq $RMM_ID }
-			$RMM_ID = $CompanyInfo.uid
+	$attempts = 0
+	while (!$RMM_Devices -or $attempts -le 5) {
+		$attempts++
+		$Response = Set-DrmmApiParameters -Url $DattoAPIKey.URL -Key $DattoAPIKey.Key -SecretKey $DattoAPIKey.SecretKey 6>&1
+		if ($RMM_ID) {
+			if ($RMM_ID -match "^\d+$") {
+				$CompanyInfo = Get-DrmmAccountSites | Where-Object { $_.id -eq $RMM_ID }
+				$RMM_ID = $CompanyInfo.uid
+			}
+			$RMM_Devices = Get-DrmmSiteDevices $RMM_ID | Where-Object { $_.deviceClass -eq 'device' -and $_.deviceType.category -in @("Laptop", "Desktop", "Server") }
+		} else {
+			$RMM_Devices = Import-Csv $RMM_CSV
 		}
-		$RMM_Devices = Get-DrmmSiteDevices $RMM_ID | Where-Object { $_.deviceClass -eq 'device' -and $_.deviceType.category -in @("Laptop", "Desktop", "Server") }
-	} else {
-		$RMM_Devices = Import-Csv $RMM_CSV
+
+		if (!$RMM_Devices) {
+			Start-Sleep -Seconds 5
+		}
 	}
 
 	if (!$RMM_Devices) {
