@@ -2419,6 +2419,8 @@ if ($DOUsageDBSave) {
 			$SC_String = "|$($Device.sc_matches -join '|')|"
 			$RMM_String = "|$($Device.rmm_matches -join '|')|"
 			$Sophos_String = "|$($Device.sophos_matches -join '|')|"
+			$ITG_String = "|$($Device.itg_matches -join '|')|"
+			$Autotask_String = "|$($Device.autotask_matches -join '|')|"
 			$SerialNum_String = "|$($SerialNumbers  -join '|')|"
 
 			if (!$Computers) {
@@ -2430,6 +2432,8 @@ if ($DOUsageDBSave) {
 					SC_ID = $SC_String
 					RMM_ID = $RMM_String
 					Sophos_ID = $Sophos_String
+					Autotask_ID = $Autotask_String
+					ITG_ID = $ITG_String
 					DeviceType = $DeviceType
 					SerialNumber = $SerialNum_String
 					Manufacturer = $Manufacturer
@@ -2443,7 +2447,7 @@ if ($DOUsageDBSave) {
 			} else {
 				# Computer exists, see if we need to update the details
 				$UpdateRequired = $false
-				$UpdatedComputer = $Computers[0] | Select-Object Id, Hostname, SC_ID, RMM_ID, Sophos_ID, DeviceType, SerialNumber, Manufacturer, Model, OS, WarrantyExpiry, LastUpdated, type
+				$UpdatedComputer = $Computers[0] | Select-Object Id, Hostname, SC_ID, RMM_ID, Sophos_ID, Autotask_ID, ITG_ID, DeviceType, SerialNumber, Manufacturer, Model, OS, WarrantyExpiry, LastUpdated, type
 				if ($Hostname -ne $Computers.Hostname) {
 					$UpdatedComputer.Hostname = $Hostname
 					$UpdateRequired = $true
@@ -2479,6 +2483,20 @@ if ($DOUsageDBSave) {
 				}
 				if ($Sophos_String -ne $Computers.Sophos_ID) {
 					$UpdatedComputer.Sophos_ID = $Sophos_String
+					$UpdateRequired = $true
+				}
+				if (!$Computers.Autotask_ID -or $Autotask_String -ne $Computers.Autotask_ID) {
+					if (!(Get-Member -inputobject $UpdatedComputer -name "Autotask_ID" -Membertype Properties)) {
+						$UpdatedComputer | Add-Member -NotePropertyName Autotask_ID -NotePropertyValue $null
+					}
+					$UpdatedComputer.Autotask_ID = $Autotask_String
+					$UpdateRequired = $true
+				}
+				if (!$Computers.ITG_ID -or $ITG_String -ne $Computers.ITG_ID) {
+					if (!(Get-Member -inputobject $UpdatedComputer -name "ITG_ID" -Membertype Properties)) {
+						$UpdatedComputer | Add-Member -NotePropertyName ITG_ID -NotePropertyValue $null
+					}
+					$UpdatedComputer.ITG_ID = $ITG_String
 					$UpdateRequired = $true
 				}
 				if ($SerialNum_String -ne $Computers.SerialNumber) {
