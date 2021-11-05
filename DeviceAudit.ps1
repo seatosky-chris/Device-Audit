@@ -2228,6 +2228,11 @@ if ($DOUsageDBSave) {
 	$Query = "SELECT * FROM Users u"
 	$ExistingUsers = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Users" -Query $Query -PartitionKey 'user'
 
+	# We will also only add a usage entry if one has not already been added today
+	$Year_Month = Get-Date -Format 'yyyy-MM'
+	$Query = "SELECT * FROM Usage u WHERE u.UseDateTime >= '$(Get-Date -UFormat '+%Y-%m-%dT00:00:00.000Z')'"
+	$ExistingUsageToday = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Usage" -Query $Query -PartitionKey $Year_Month
+
 	foreach ($Device in $MatchedDevices) {
 		$ActivityComparison = compare_activity($Device)
 		$Activity = @($ActivityComparison.Values) | Sort-Object last_active
@@ -2539,6 +2544,11 @@ if ($DOUsageDBSave) {
 					$User.LastUpdated = $Now_UTC
 					Set-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Users" -Id $UserID -DocumentBody ($User | ConvertTo-Json) -PartitionKey 'user' | Out-Null
 				}
+			}
+
+			# If a usage entry already exists today, skip adding another
+			if (($ExistingUsageToday | Where-Object { $_.ComputerID -eq $Computers.id -and $_.UserID -eq $User.id } | Measure-Object).Count -gt 1) {
+				continue
 			}
 
 			# Add a usage entry
