@@ -3821,9 +3821,11 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						$ActivityComparison = compare_activity($MatchedDevice)
 						$Activity = $ActivityComparison.Values | Sort-Object last_active
 						$LastSeen = ''
+						$LastSeenUTC = $null
 						if (($Activity | Measure-Object).count -gt 1) {
 							$LastIndex = ($Activity | Measure-Object).count-1
 							$LastSeen = [DateTime]($Activity.last_active | Sort-Object | Select-Object -Last 1)
+							$LastSeenUTC = $LastSeen.ToUniversalTime()
 						}
 
 						$Row = [PSCustomObject]@{
@@ -3836,7 +3838,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						$DeviceHistory += [PSCustomObject]@{
 							'DeviceID' = $ITG_DeviceID
 							'DeviceName' = $Hostname
-							'LastSeen' = $LastSeen.ToUniversalTime()
+							'LastSeen' = $LastSeenUTC
 							'Type' = 'Current'
 						}
 					}
