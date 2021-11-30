@@ -2147,7 +2147,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				# send an email
 				$EmailSubject = "Device Audit on $Company_Acronym - Devices Found that are missing a connection"
 				$EmailIntro = "Devices were found that are missing in 1 or more systems (RMM, SC, or Sophos). Auto-fixes have been attempted where possible. Please review:"
-				$DeviceTable = @($MissingConnections) | ConvertTo-HTML -Fragment -As Table | Out-String
+				$DeviceTable = @($MissingConnections) | Where-Object { $_.LastActive -gt (Get-Date (Get-Date).AddDays(-7)) } | ConvertTo-HTML -Fragment -As Table | Out-String
 
 				$HTMLEmail = $EmailTemplate -f `
 								$EmailIntro, 
