@@ -44,6 +44,16 @@ $LANFlexAssetName = "LAN"
 #
 $OverviewFlexAssetName = "Custom Overview"
 
+####################
+# $HyperVRegex
+#
+# Regex for finding Hyper-V hosts by hostname. 
+# This won't be perfect but should pick up the majority.
+#
+# Example: $HyperVRegex = "(-HV\d?\d?)|(-HOST)|(-VHOST\d?\d?)|(^VHOST\d?\d?)$"
+#
+$HyperVRegex = "(-HV\d?\d?)|(-HOST)|(-VHOST\d?\d?)|(^VHOST\d?\d?)$"
+
 ##################################################################################################################
 ##############################################  EXPORT LOCATIONS  ################################################
 ##################################################################################################################

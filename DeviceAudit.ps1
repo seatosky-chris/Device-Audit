@@ -1253,8 +1253,21 @@ function compare_activity($MatchedDevice) {
 }
 
 # Helper function that checks a device from the $MatchedDevices array against the $Ignore_Installs config value and returns true if it should be ignored
+# Also ignores Sophos on Hyper-V hosts via a regex check
 # $System should be 'sc', 'rmm', or 'sophos'
 function ignore_install($Device, $System) {
+	if ($System -eq 'sc' -and $Ignore_Installs.SC -eq $true) {
+		return $true
+	} elseif ($System -eq 'rmm' -and $Ignore_Installs.RMM -eq $true) {
+		return $true
+	} elseif ($System -eq 'sophos' -and $Ignore_Installs.Sophos -eq $true) {
+		return $true
+	}
+
+	if ($System -eq 'sophos' -and ($Device.rmm_hostname -match $HyperVRegex -or $Device.sc_hostname -match $HyperVRegex)) {
+		return $true;
+	}
+
 	$IgnoredDevices = @()
 	if ($System -eq 'sc') {
 		$IgnoredDevices = $Ignore_Installs.SC
