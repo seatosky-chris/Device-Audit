@@ -4,6 +4,7 @@ Logs/
 ErrorLogs/
 History/
 WAN_LAN_History/
+DeviceUsers/
 Config Files/*
 Config Files/Archive
 *.lnk

@@ -144,6 +144,15 @@ $HistoryLocation = "C:\Users\Administrator\Documents\DeviceAuditHistory"
 $LogLocation = "C:\Users\Administrator\Documents\Device Audit\Logs"
 
 ####################
+# $DeviceUsersLocation
+#
+# The location to store a list of all the users using each computer
+#
+# Example: $DeviceUsersLocation = "C:\Users\Administrator\Documents\DeviceUsers"
+#
+$DeviceUsersLocation = "C:\Users\Administrator\Documents\Device Audit\DeviceUsers"
+
+####################
 # $WAN_LAN_HistoryLocation
 #
 # The location to store previous devices found in each WAN / LAN

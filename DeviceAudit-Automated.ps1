@@ -2343,7 +2343,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		Write-Host "======================"
 	}
 
-	# Save each user and the computer(s) they are using into the Usage database (for user audits and documenting who uses each computer)
+	# Save each user and the computer(s) they are using into the Usage database (for user audits and documenting who uses each computer), then update users assigned to each computer
 	if ($DOUsageDBSave) {
 		# Connect to Account and DB
 		$Account_Name = "stats-$($Company_Acronym.ToLower())"
@@ -2802,6 +2802,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		$LastMonth = (Get-Date).AddMonths(-1)
 		$LastDay = [DateTime]::DaysInMonth($LastMonth.Year, $LastMonth.Month)
 		$CheckDate = [DateTime]::new($LastMonth.Year, $LastMonth.Month, $LastDay, 23, 59, 59)
+		$MonthlyStatsUpdated = $false
 		if (!$StatsLastUpdated -or ($StatsLastUpdated -and (Get-Date $StatsLastUpdated.LastUpdated) -lt $CheckDate)) {
 			# Get all usage documents
 			$Year_Month = Get-Date (Get-Date).AddMonths(-1) -Format 'yyyy-MM'
@@ -3038,8 +3039,486 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					$StatsUpdated.id = $([Guid]::NewGuid().ToString())
 					New-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Variables" -DocumentBody ($StatsUpdated | ConvertTo-Json) -PartitionKey 'StatsLastUpdated' | Out-Null
 				}
+
+				$MonthlyStatsUpdated = $true
 			}
 		}
+
+		#####
+		## Update the documented users for each computer
+		#####
+
+		# Get the last time we updated the users
+		$ComputerUsersLastUpdated = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId 'Variables' -Query "SELECT * FROM Variables AS v WHERE v.variable = 'ComputerUsersLastUpdated'" -PartitionKey 'ComputerUsersLastUpdated'
+
+		# Update the users every 7 days or after the monthly stats have just been updated and then update the LastUpdated variable
+		# If we are within the first 7 days of the month, don't check the last weeks usage (as we are only grabbing usage from the current month for that purpose)
+		$CurrentDate = Get-Date 
+		$SevenDaysAgo = ($CurrentDate).AddDays(-7) 
+		if ($ComputerUsersLastUpdated -and $ComputerUsersLastUpdated.LastUpdated) {
+			$LastUpdated = (Get-Date $ComputerUsersLastUpdated.LastUpdated)
+		} else {
+			$LastUpdated = $null
+		}
+
+		if (!$LastUpdated -or $MonthlyStatsUpdated -or ($LastUpdated -and $LastUpdated -lt $SevenDaysAgo -and $CurrentDate.Day -gt 7)) {
+			$UpdateWeekly = $false
+			if ($CurrentDate.Day -gt 7) {
+				$UpdateWeekly = $true
+				$Year_Month = Get-Date -Format 'yyyy-MM'
+				$SevenDaysAgoUTC = Get-Date ($SevenDaysAgo).ToUniversalTime() -UFormat '+%Y-%m-%dT00:00:00.000Z'
+				$LastWeeksUsage = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Usage" -Query "SELECT * FROM Usage AS u WHERE u.UseDateTime >= '$($SevenDaysAgoUTC)' ORDER BY u.UseDateTime DESC" -PartitionKey $Year_Month
+			}
+
+			# Get existing device users from the logs (we have to query related items per-device so this saves us a LOT of api calls)
+			$ExistingDeviceUsers = $false
+			if ($DeviceUsersLocation) {
+				$DeviceUsersPath = "$($DeviceUsersLocation)\$($Company_Acronym)_device_users.json"
+				if (Test-Path $DeviceUsersPath) {
+					$ExistingDeviceUsers = Get-Content -Path $DeviceUsersPath -Raw | ConvertFrom-Json
+				}
+			}
+
+			# Update our data on all the users and computers (we need this to match id's to ITG)
+			$Query = "SELECT * FROM Computers c"
+			$ExistingComputers = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Computers" -Query $Query -PartitionKey 'computer'
+			$Query = "SELECT * FROM Users u"
+			$ExistingUsers = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Users" -Query $Query -PartitionKey 'user'
+
+			if (!$LastUpdated -and (!$MonthlyStatsUpdated -or !$Updated_ComputerUsage -or !$Updated_UserUsage)) {
+				# If we have not updated the users before, and we didn't just update the monthly stats, grab the most recent monthly stats
+				# Otherwise, we'll only update based on these at the end of the month just after updating the monthly stats
+				$Year_Month = Get-Date (Get-Date).AddMonths(-1) -Format 'yyyy-MM'
+				$Usage = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Usage" -Query "SELECT * FROM Usage AS u WHERE u.yearmonth = '$Year_Month'" -PartitionKey $Year_Month
+				if ($Usage) {
+					# Get all existing monthly stats
+					$ComputerIDs = $Usage.ComputerID | Select-Object -Unique
+					$Query = "SELECT * FROM ComputerUsage AS cu WHERE cu.id IN ('$($ComputerIDs -join "', '")')"
+					$ComputerUsage = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "ComputerUsage" -Query $Query -QueryEnableCrossPartition $true
+		
+					$UserIDs = $Usage.UserID | Select-Object -Unique
+					$Query = "SELECT * FROM UserUsage AS uu WHERE uu.id IN ('$($UserIDs -join "', '")')"
+					$UserUsage = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "UserUsage" -Query $Query -QueryEnableCrossPartition $true
+				}
+			} elseif ($Updated_ComputerUsage -and $Updated_UserUsage) {
+				$ComputerUsage = $Updated_ComputerUsage
+				$UserUsage = $Updated_UserUsage
+			} else {
+				$ComputerUsage = $false
+				$UserUsage = $false
+			}
+
+			$DeviceUsers = @()
+			$AssignedUsers = @()
+			$FullUpdate = $false
+
+			# Do a FULL update (based on last months monthly stats)
+			if ($ComputerUsage -and $UserUsage) {
+				$FullUpdate = $true
+				$Year_Month = Get-Date (Get-Date).AddMonths(-1) -Format 'yyyy-MM'
+
+				# Go through each device and find the primary user and any secondary users who've used the device > 25% of the time
+				foreach ($Device in $ITG_Devices) {
+					if ($Device.attributes.archived) {
+						continue
+					}
+					if ($Device.attributes.'configuration-type-kind' -ne 'workstation' -and $Device.attributes.'configuration-type-kind' -ne 'laptop') {
+						continue
+					}
+
+					$ExistingComputer = $ExistingComputers | Where-Object { $_.ITG_ID -like "*|$($Device.id)|*" }
+					if (!$ExistingComputer) {
+						$DeviceUsers += [pscustomobject]@{
+							ITG_Computer = $Device.id
+							PrimaryUser = $null
+							SecondaryUsers = @()
+							RecentUsers = @()
+						}
+						continue
+					}
+
+					$UsageStats = $ComputerUsage | Where-Object { $_.id -eq $ExistingComputer.id }
+					$UsersUsedBy = $UsageStats.UsersUsedBy | Where-Object { $_.DaysActive.History.$Year_Month } | Sort-Object -Property {$_.DaysActive.LastMonthPercent} -Descending
+					$PrimaryUser = $UsersUsedBy | Select-Object -First 1
+					$RemainingUsers = $UsersUsedBy | Select-Object -Skip 1
+					$SecondaryUsers = @($RemainingUsers | Where-Object { $_.DaysActive.LastMonthPercent -ge 25 -and $_.DaysActive.LastMonth -ge 5 })
+
+					$PrimaryUser_ITG = $null
+					$SecondaryUsers_ITG = @()
+
+					if ($PrimaryUser) {
+						$AssignedUsers += $PrimaryUser.id
+						$DBUser = $ExistingUsers | Where-Object { $_.id -eq $PrimaryUser.id }
+						if ($DBUser -and $DBUser.ITG_ID) {
+							$PrimaryUser_ITG = $DBUser.ITG_ID
+						}
+					}
+					if ($SecondaryUsers) {
+						foreach ($User in $SecondaryUsers) {
+							$AssignedUsers += $User.id
+							$DBUser = $ExistingUsers | Where-Object { $_.id -eq $User.id }
+							if ($DBUser -and $DBUser.ITG_ID) {
+								$SecondaryUsers_ITG += $DBUser.ITG_ID
+							}
+						}
+					}
+
+					$DeviceUsers += [pscustomobject]@{
+						ITG_Computer = $Device.id
+						PrimaryUser = $PrimaryUser_ITG
+						SecondaryUsers = $SecondaryUsers_ITG
+						RecentUsers = @()
+					}
+				}
+				
+				# Go through any users who have not been assigned to a computer, and assign them to whichever computer they have used the most in the past month
+				foreach ($UserUse in $UserUsage) {
+					if ($UserUse.id -in $AssignedUsers) {
+						continue
+					}
+					if (!$UserUse.DaysActive.History.$Year_Month) {
+						continue
+					}
+
+					$DBUser = $ExistingUsers | Where-Object { $_.id -eq $UserUse.id }
+					if (!$DBUser.ITG_ID) {
+						continue
+					}
+
+					$ComputersUsed = $UserUse.ComputersUsed | Where-Object { $_.DaysActive.History.$Year_Month } | Sort-Object -Property {$_.DaysActive.LastMonthPercent} -Descending
+					$PrimaryComputer = $ComputersUsed | Select-Object -First 1
+
+					$PrimaryComputer_ITG = $null
+					if ($PrimaryComputer) {
+						$AssignedUsers += $UserUse.id
+						$DBComputer = $ExistingComputers | Where-Object { $_.id -eq $PrimaryComputer.id }
+						if ($DBComputer -and $DBComputer.ITG_ID) {
+							$Computer_ITG_IDs = @($DBComputer.ITG_ID.Split("|") | Where-Object { $_ })
+							foreach ($ID in $Computer_ITG_IDs) {
+								$DeviceUser = $DeviceUsers | Where-Object { $_.ITG_Computer -eq $ID }
+								
+								if ($DeviceUser) {
+									# update
+									if ($DeviceUser.PrimaryUser) {
+										$DeviceUser.SecondaryUsers += $DBUser.ITG_ID
+									} else {
+										$DeviceUser.PrimaryUser = $DBUser.ITG_ID
+									}
+								} else {
+									# new
+									$DeviceUsers += [pscustomobject]@{
+										ITG_Computer = $ID
+										PrimaryUser = $DBUser.ITG_ID
+										SecondaryUsers = @()
+										RecentUsers = @()
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+
+			# Do a WEEKLY update (based on usage from the last 7 days)
+			# We will only add any heavy users from the last week, we won't remove any users
+			if ($UpdateWeekly) {
+				$ComputerIDs = $LastWeeksUsage.ComputerID | Select-Object -Unique
+				$Monthly_UsageByComputerUser = $LastWeeksUsage | Select-Object ComputerID, UserID, UseDateTime, @{Name="Day"; E={ Get-Date $_.UseDateTime -Format 'dd' }} | Group-Object -Property ComputerID, UserID
+				$Monthly_OutOfDays = ($LastWeeksUsage | Select-Object @{Name="Day"; E={ Get-Date $_.UseDateTime -Format 'dd' }} | Select-Object -ExpandProperty Day | Sort-Object -Unique | Measure-Object).Count
+
+				foreach ($ComputerID in $ComputerIDs) {
+					$MonthsUsageByUser = $Monthly_UsageByComputerUser | Where-Object { $_.Name -like "*$ComputerID*" }
+					$DBComputer = $ExistingComputers | Where-Object { $_.id -eq $ComputerID }
+
+					if ($DBComputer -and $DBComputer.ITG_ID) {
+						$Computer_ITG_IDs = @($DBComputer.ITG_ID.Split("|") | Where-Object { $_ })
+					} else {
+						continue
+					}
+
+					foreach ($User in $MonthsUsageByUser) {
+						$UserID = $User.Group[0].UserID
+						$DBUser = $ExistingUsers | Where-Object { $_.id -eq $UserID }
+						$DaysActive = ($User.Group | Select-Object Day | Select-Object -ExpandProperty Day | Sort-Object -Unique | Measure-Object).Count
+						$DaysActivePercent = [Math]::Round($DaysActive / $Monthly_OutOfDays * 100)
+
+						if ($DBUser.ITG_ID -and $DaysActivePercent -ge 25) {
+							# Usage in last week is high, add to computer if necessary
+							foreach ($Device_ITG_ID in $Computer_ITG_IDs) {
+								$DeviceUser = $DeviceUsers | Where-Object { $_.ITG_Computer -eq $Device_ITG_ID }
+
+								if ($DeviceUser) {
+									if ($DeviceUser.PrimaryUser -eq $DBUser.ITG_ID -or $DeviceUser.SecondaryUsers -contains $DBUser.ITG_ID -or $DeviceUser.RecentUsers -contains $DBUser.ITG_ID) {
+										# already assigned to that computer
+										continue
+									} else {
+										# update
+										$DeviceUser.RecentUsers += $DBUser.ITG_ID
+									}
+								} else {
+									# new
+									$DeviceUsers += [pscustomobject]@{
+										ITG_Computer = $Device_ITG_ID
+										PrimaryUser = $null
+										SecondaryUsers = @()
+										RecentUsers = @($DBUser.ITG_ID)
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+
+			# All devices / users mapped, update IT Glue (if it's a full update, delete existing mappings as well)
+			if ($DeviceUsers) {
+				$ITG_Contacts = Get-ITGlueContacts -organization_id $ITG_ID -page_size 10000
+				if ($ITG_Contacts.data) {
+					$ITG_Contacts = $ITG_Contacts.data
+				}
+				$ITGLocations = Get-ITGlueLocations -org_id $ITG_ID
+				if ($ITGLocations.data) {
+					$ITGLocations = $ITGLocations.data
+				}
+				$AutotaskContacts = Get-AutotaskAPIResource -Resource Contacts -SimpleSearch "companyID eq $Autotask_ID"
+				$AutotaskContacts = $AutotaskContacts | Where-Object { $_.isActive }
+
+				foreach ($Device in $DeviceUsers) {
+					$ITG_Device = $ITG_Devices | Where-Object { $_.id -eq $Device.ITG_Computer }
+					$MatchedDevice = $MatchedDevices | Where-Object { $_.itg_matches -contains $Device.ITG_Computer }
+					$Autotask_Device = $false
+					if ($MatchedDevice.autotask_matches) {
+						$Autotask_Device = $Autotask_Devices | Where-Object { $_.id -in $MatchedDevice.autotask_matches }
+					}
+					$Existing_RelatedItems = $false
+					$Existing_DeviceUsersLogged = $ExistingDeviceUsers | Where-Object { $_.ITG_Computer -eq $Device.ITG_Computer }
+
+					# If the contact is synced with autotask then we cannot update ITG directly, we need to find the autotask contact and update autotask instead
+					if ($Device.PrimaryUser -and $ITG_Contacts) {
+						$ITG_Contact = $ITG_Contacts | Where-Object { $_.id -eq $Device.PrimaryUser }
+						if ($ITG_Contact -and $ITG_Contact.attributes.'psa-integration' -eq 'enabled') {
+							$PrimaryITGEmail = $ITG_Contact.attributes.'contact-emails' | Where-Object { $_.primary -eq "True" }
+							$Autotask_Contact = $AutotaskContacts | Where-Object { $_.firstName -eq $ITG_Contact.attributes.'first-name' -and $_.lastName -eq $ITG_Contact.attributes.'last-name' -and $_.emailAddress -eq $PrimaryITGEmail.value }
+
+							if (($Autotask_Contact | Measure-Object).Count -gt 1) {
+								$Autotask_Contact = $Autotask_Contact | Where-Object { $_.title.Trim() -eq ($ITG_Contact.attributes.title | Out-String).Trim() -and ((($_.mobilePhone -replace '\D', '') -in $ITG_Contact.attributes.'contact-phones'.value -and ($_.phone -replace '\D', '') -in $ITG_Contact.attributes.'contact-phones'.value) -or !$ITG_Contact.attributes.'contact-phones'.value ) }
+							}
+
+							if (($Autotask_Contact | Measure-Object).Count -gt 1 -and $ITGLocations -and $ITG_Contact.attributes.'location-id') {
+								$Location = $ITGLocations | Where-Object { $_.id -eq $ITG_Contact.attributes.'location-id' }
+								$Autotask_Contact = $Autotask_Contact | Where-Object { $_.city -like $Location.attributes.city -and $_.state -like $Location.attributes.'region-name' -and ($_.zipCode -replace '\W', '') -like ($Location.attributes.'postal-code' -replace '\W', '') }
+								if (($Autotask_Contact | Measure-Object).Count -gt 1) {
+									$Autotask_Contact = $Autotask_Contact | Where-Object { $_.addressLine -like $Location.attributes.'address-1' }
+								}
+							}
+
+							if (($Autotask_Contact | Measure-Object).Count -gt 1) {
+								$Autotask_Contact = $Autotask_Contact[0]
+							}
+						}
+					}
+
+					$PSAIntegration = $false
+					if ($ITG_Device -and $ITG_Device.attributes.'psa-integration' -ne 'disabled') {
+						$PSAIntegration = $true
+					}
+
+					if ($FullUpdate) {
+						$ITGDetails = Get-ITGlueConfigurations -id $Device.ITG_Computer -include 'related_items'
+						if ($ITGDetails.included) {
+							$Existing_RelatedItems = $ITGDetails.included
+						}
+
+						# Remove any existing related items that don't match the new data
+						if ($Existing_RelatedItems) {
+							$AutoAssigned = $Existing_RelatedItems | Where-Object { $_.attributes.'asset-type' -eq 'contact' -and $_.attributes.notes -like "*(Auto-Assigned)" }
+							$RemoveRelated = @()
+							foreach ($RelatedItem in $AutoAssigned) {
+								if ($RelatedItem.attributes.notes -like "Primary User*" -and $RelatedItem.attributes.'resource-id' -ne $Device.PrimaryUser) {
+									$RemoveRelated += @{
+										'type' = 'related_items'
+										'attributes' = @{
+											'id' = $RelatedItem.id
+										}
+									}
+									$Existing_RelatedItems = $Existing_RelatedItems | Where-Object { $_.id -ne $RelatedItem.id }
+								}
+								if ($RelatedItem.attributes.notes -like "Secondary User*" -and $RelatedItem.attributes.'resource-id' -notin $Device.SecondaryUsers) {
+									$RemoveRelated += @{
+										'type' = 'related_items'
+										'attributes' = @{
+											'id' = $RelatedItem.id
+										}
+									}
+									$Existing_RelatedItems = $Existing_RelatedItems | Where-Object { $_.id -ne $RelatedItem.id }
+								}
+								if ($RelatedItem.attributes.notes -like "Recently Seen*" -and $RelatedItem.attributes.'resource-id' -notin $Device.RecentUsers) {
+									$RemoveRelated += @{
+										'type' = 'related_items'
+										'attributes' = @{
+											'id' = $RelatedItem.id
+										}
+									}
+									$Existing_RelatedItems = $Existing_RelatedItems | Where-Object { $_.id -ne $RelatedItem.id }
+								}
+							}
+
+							if ($RemoveRelated) {
+								Remove-ITGlueRelatedItems -resource_type 'configurations' -resource_id $Device.ITG_Computer -data $RemoveRelated
+							}
+						}
+
+						# If no primary contact anymore, remove from configuration
+						if (!$Device.PrimaryUser -and $ITG_Device.attributes.'contact-id') {
+							if (!$PSAIntegration) {
+								$UpdatedConfig = @{
+									'type' = 'configurations'
+									'attributes' = @{
+										'contact-id' = ""
+										'contact-name' = ""
+									}
+								}
+								Set-ITGlueConfigurations -id $Device.ITG_Computer -data $UpdatedConfig
+							} elseif ($Autotask_Contact -and $Autotask_Device) {
+
+								foreach ($AutoDevice in $Autotask_Device) {
+									$ConfigurationUpdate = 
+									[PSCustomObject]@{
+										id = $AutoDevice.id
+										contactID = ""
+									}
+
+									Set-AutotaskAPIResource -Resource ConfigurationItems -ID $AutoDevice.id -body $ConfigurationUpdate
+								}
+							}
+						}
+					}
+
+					# Set primary contact
+					if ($Device.PrimaryUser -and (!$ITG_Device -or $ITG_Device.attributes.'contact-id' -ne $Device.PrimaryUser)) {
+						if (!$PSAIntegration) {
+							$UpdatedConfig = @{
+								'type' = 'configurations'
+								'attributes' = @{
+									'contact-id' = $Device.PrimaryUser
+								}
+							}
+							Set-ITGlueConfigurations -id $Device.ITG_Computer -data $UpdatedConfig
+						} elseif ($Autotask_Contact -and $Autotask_Device) {
+							foreach ($AutoDevice in $Autotask_Device) {
+								$ConfigurationUpdate = 
+								[PSCustomObject]@{
+									id = $AutoDevice.id
+									contactID = $Autotask_Contact.id
+								}
+
+								Set-AutotaskAPIResource -Resource ConfigurationItems -ID $AutoDevice.id -body $ConfigurationUpdate
+							}
+						}
+					}
+
+					# Add new related items, checking first if they already exist in $Existing_RelatedItems
+					$RelatedItems = @()
+					if ($Device.PrimaryUser) {
+						if (!$Existing_RelatedItems -or ($Existing_RelatedItems | Where-Object { $_.attributes.'resource-id' -eq $Device.PrimaryUser -and $_.attributes.notes -like "*(Auto-Assigned)" } | Measure-Object).Count -eq 0) {
+							$RelatedItems += @{
+								type = 'related_items'
+								attributes = @{
+									destination_id = $Device.PrimaryUser
+									destination_type = "Contact"
+									notes = "Primary User (Auto-Assigned)"
+								}
+							}
+						}
+					}
+
+					if ($Device.SecondaryUsers) {
+						foreach ($User in $Device.SecondaryUsers) {
+							if (!$Existing_RelatedItems -or ($Existing_RelatedItems | Where-Object { $_.attributes.'resource-id' -eq $User -and $_.attributes.notes -like "*(Auto-Assigned)" } | Measure-Object).Count -eq 0) {
+								$RelatedItems += @{
+									type = 'related_items'
+									attributes = @{
+										destination_id = $User
+										destination_type = "Contact"
+										notes = "Secondary User (Auto-Assigned)"
+									}
+								}
+							}
+						}
+					}
+
+					if ($Device.RecentUsers) {
+						foreach ($User in $Device.RecentUsers) {
+							if ((!$Existing_RelatedItems -or ($Existing_RelatedItems | Where-Object { $_.attributes.'resource-id' -eq $User -and $_.attributes.notes -like "*(Auto-Assigned)" } | Measure-Object).Count -eq 0) -and (!$Existing_DeviceUsersLogged -or ($Existing_DeviceUsersLogged.PrimaryUser -ne $User -and $Existing_DeviceUsersLogged.RecentUsers -notcontains $User -and $Existing_DeviceUsersLogged.SecondaryUsers -notcontains $User))) {
+								$RelatedItems += @{
+									type = 'related_items'
+									attributes = @{
+										destination_id = $User
+										destination_type = "Contact"
+										notes = "Recently Seen User (Auto-Assigned)"
+									}
+								}
+							}
+						}
+					}
+
+					if ($RelatedItems) {
+						New-ITGlueRelatedItems -resource_type configurations -resource_id $Device.ITG_Computer -data $RelatedItems
+					}
+				}
+
+				# Update "Computer Users Last Updated" variable to current datetime
+				$StatsUpdated = @{
+					variable = 'ComputerUsersLastUpdated'
+					LastUpdated = Get-Date (Get-Date).ToUniversalTime() -UFormat '+%Y-%m-%dT%H:%M:%S.000Z'
+				}
+				if ($ComputerUsersLastUpdated) {
+					# update
+					$StatsUpdated.id = $ComputerUsersLastUpdated.id
+					Set-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Variables" -Id $ComputerUsersLastUpdated.id -DocumentBody ($StatsUpdated | ConvertTo-Json) -PartitionKey 'ComputerUsersLastUpdated' | Out-Null
+				} else {
+					# new
+					$StatsUpdated.id = $([Guid]::NewGuid().ToString())
+					New-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Variables" -DocumentBody ($StatsUpdated | ConvertTo-Json) -PartitionKey 'ComputerUsersLastUpdated' | Out-Null
+				}
+				$LastUpdated = Get-Date
+			}
+
+			# Export an updated json file of device users
+			if ($DeviceUsers -and $DeviceUsersPath) {
+				if ($ExistingDeviceUsers -and !$FullUpdate) {
+					$DeviceUsersExport = $ExistingDeviceUsers
+					foreach ($Device in $DeviceUsers) {
+						$DeviceUserExport = $DeviceUsersExport | Where-Object { $_.ITG_Computer -eq $Device.ITG_Computer }
+						if (!$DeviceUserExport) {
+							$DeviceUsersExport += $Device
+						} else {
+							if ($Device.PrimaryUser -and $Device.PrimaryUser -ne $DeviceUserExport.PrimaryUser) {
+								$DeviceUserExport.PrimaryUser = $Device.PrimaryUser
+							}
+							if ($Device.SecondaryUsers) {
+								foreach ($User in $Device.SecondaryUsers) {
+									if ($User -notin $DeviceUserExport.SecondaryUsers) {
+										$DeviceUserExport.SecondaryUsers += $User
+									}
+								}
+							}
+							if ($Device.RecentUsers) {
+								foreach ($User in $Device.RecentUsers) {
+									if ($User -notin $DeviceUserExport.RecentUsers -and $User -notin $DeviceUserExport.SecondaryUsers -and $User -ne $DeviceUserExport.PrimaryUser) {
+										$DeviceUserExport.RecentUsers += $User
+									}
+								}
+							}
+						}
+					}
+				} else {
+					$DeviceUsersExport = $DeviceUsers
+				}
+				$DeviceUsersExport | ConvertTo-Json | Out-File -FilePath $DeviceUsersPath
+			}
+		}
+
 	
 		Write-Host "Usage Stats Saved!"
 		Write-Host "===================="
