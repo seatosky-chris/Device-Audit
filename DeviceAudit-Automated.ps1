@@ -4758,8 +4758,6 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						"current-version" = $LastUpdatedPage.data.attributes.traits."current-version"
 						"contact-audit" = $LastUpdatedPage.data.attributes.traits."contact-audit"
 						"contact-audit-monitoring-disabled" = $LastUpdatedPage.data.attributes.traits."contact-audit-monitoring-disabled"
-						"user-usage" = $LastUpdatedPage.data.attributes.traits."user-usage"
-						"user-usage-monitoring-disabled" = $LastUpdatedPage.data.attributes.traits."user-usage-monitoring-disabled"
 						"billing-update-ua" = $LastUpdatedPage.data.attributes.traits."billing-update-ua"
 						"billing-update-ua-monitoring-disabled" = $LastUpdatedPage.data.attributes.traits."billing-update-ua-monitoring-disabled"
 						"o365-license-report" = $LastUpdatedPage.data.attributes.traits."o365-license-report"
