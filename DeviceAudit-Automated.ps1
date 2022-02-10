@@ -4438,7 +4438,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 								}
 							}
 						}
-						$New_WANOverview = New-ITGlueFlexibleAssets -organization_id $ITG_ID -data $FlexAssetBody
+						$New_WANOverview = New-ITGlueFlexibleAssets -data $FlexAssetBody
 						$OverviewID = $New_WANOverview.data.id
 					}
 
@@ -4650,7 +4650,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 								}
 							}
 						}
-						$New_LANOverview = New-ITGlueFlexibleAssets -organization_id $ITG_ID -data $FlexAssetBody
+						$New_LANOverview = New-ITGlueFlexibleAssets -data $FlexAssetBody
 						$OverviewID = $New_LANOverview.data.id
 					}
 			
