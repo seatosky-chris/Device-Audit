@@ -92,6 +92,7 @@ if ($ITGAPIKey.Key) {
 	$WANFilterID = (Get-ITGlueFlexibleAssetTypes -filter_name $WANFlexAssetName).data
 	$LANFilterID = (Get-ITGlueFlexibleAssetTypes -filter_name $LANFlexAssetName).data
 	$OverviewFilterID = (Get-ITGlueFlexibleAssetTypes -filter_name $OverviewFlexAssetName).data
+	$ScriptsLastRunFilterID = (Get-ITGlueFlexibleAssetTypes -filter_name $ScriptsLastRunFlexAssetName).data
 	$ITGConnected = $true
 }
 
@@ -2182,6 +2183,12 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		$InactiveDeleteDaysRMM = $InactiveDeleteDays
 	}
 
+	$DeviceIssueCheckRan = $false
+	$DeviceUsageUpdateRan = $false
+	$DeviceLocationsUpdateRan = $false
+	$MonthlyStatsUpdated = $false
+	$DeviceBillingUpdateRan = $false
+
 	# Check for devices that haven't been seen in a long time (in $InactiveDeleteDays) and suggest they be deleted
 	if ($DOInactiveSearch) {
 		Write-Host "Searching for old inactive devices..."
@@ -2194,6 +2201,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			if (($Activity | Measure-Object).count -gt 0) {
 				$NewestDate = [DateTime]($Activity.last_active | Sort-Object | Select-Object -Last 1)
 				$Timespan = New-TimeSpan -Start $NewestDate -End $Now
+				$DeviceIssueCheckRan = $true
 				
 				if ($Timespan.Days -gt $InactiveDeleteDays -or ($Activity.type -contains "rmm" -and $Timespan.Days -gt $InactiveDeleteDaysRMM)) {
 					$RMMOnly = $false
@@ -2435,6 +2443,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			if (($Activity | Measure-Object).count -gt 0) {
 				$NewestDate = [DateTime]($Activity.last_active | Sort-Object | Select-Object -Last 1)
 				$Timespan = New-TimeSpan -Start $NewestDate -End $Now
+				$DeviceUsageUpdateRan = $true
 	
 				if ($Timespan.TotalHours -gt 6) {
 					# The device has not been seen in the last 6 hours, lets just skip it
@@ -3801,6 +3810,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			Close-ExcelPackage $excel
 
 			Write-Host "Device list exported. See: $($FileName)" -ForegroundColor Green
+			$DeviceBillingUpdateRan = $true
 
 			# Consider sending a billing update email
 			$Now = get-date
@@ -4262,6 +4272,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						}
 
 						Set-AutotaskAPIResource -Resource ConfigurationItems -ID $Autotask_DeviceID -body $ConfigurationUpdate | Out-Null
+						$DeviceLocationsUpdateRan = $true
 					}
 				}
 				Write-Progress -Activity "Updating Device Locations" -Status "Ready" -Completed
@@ -4690,6 +4701,112 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 		Write-Host "Device locations updated."
 		Write-Host "======================"
+	}
+
+	# Update / Create the "Scripts - Last Run" ITG page which shows when the device audit (and other scripts) last ran
+	if ($ScriptsLastRunFilterID -and $ITG_ID) {
+		$LastUpdatedPage = Get-ITGlueFlexibleAssets -filter_flexible_asset_type_id $ScriptsLastRunFilterID.id -filter_organization_id $ITG_ID
+	
+		if (!$LastUpdatedPage -or !$LastUpdatedPage.data) {
+			# Upload new to ITG
+			$FlexAssetBody = 
+			@{
+				type = 'flexible-assets'
+				attributes = @{
+					'organization-id' = $ITG_ID
+					'flexible-asset-type-id' = $ScriptsLastRunFilterID.id
+					traits = @{
+						"name" = "Scripts - Last Run"
+						"current-version" = "N/A"
+					}
+				}
+			}
+			$LastUpdatedPage = New-ITGlueFlexibleAssets -data $FlexAssetBody
+			Write-Host "Created a new 'Scripts - Last Run' page."
+		}
+
+		if ($LastUpdatedPage) {
+			# Update asset with last run times for the device audit
+			$DeviceCleanupTime = $LastUpdatedPage.data.attributes.traits."device-cleanup"
+			if ($DeviceIssueCheckRan) {
+				$DeviceCleanupTime = (Get-Date).ToString("yyyy-MM-dd")
+			}
+			$BillingUpdateTime = $LastUpdatedPage.data.attributes.traits."billing-update-ua"
+			if ($DeviceBillingUpdateRan) {
+				$BillingUpdateTime = (Get-Date).ToString("yyyy-MM-dd")
+			}
+			$DeviceUsageTime = $LastUpdatedPage.data.attributes.traits."device-usage"
+			if ($DeviceUsageUpdateRan) {
+				$DeviceUsageTime = (Get-Date).ToString("yyyy-MM-dd")
+			}
+			$DeviceLocationsTime = $LastUpdatedPage.data.attributes.traits."device-locations"
+			if ($DeviceLocationsUpdateRan) {
+				$DeviceLocationsTime = (Get-Date).ToString("yyyy-MM-dd")
+			}
+			$MonthlyStatsTime = $LastUpdatedPage.data.attributes.traits."monthly-stats-rollup"
+			if ($MonthlyStatsUpdated) {
+				$MonthlyStatsTime = (Get-Date).ToString("yyyy-MM-dd")
+			}
+
+			$FlexAssetBody = 
+			@{
+				type = 'flexible-assets'
+				attributes = @{
+					traits = @{
+						"name" = "Scripts - Last Run"
+
+						"current-version" = $LastUpdatedPage.data.attributes.traits."current-version"
+						"contact-audit" = $LastUpdatedPage.data.attributes.traits."contact-audit"
+						"contact-audit-monitoring-disabled" = $LastUpdatedPage.data.attributes.traits."contact-audit-monitoring-disabled"
+						"user-usage" = $LastUpdatedPage.data.attributes.traits."user-usage"
+						"user-usage-monitoring-disabled" = $LastUpdatedPage.data.attributes.traits."user-usage-monitoring-disabled"
+						"billing-update-ua" = $LastUpdatedPage.data.attributes.traits."billing-update-ua"
+						"billing-update-ua-monitoring-disabled" = $LastUpdatedPage.data.attributes.traits."billing-update-ua-monitoring-disabled"
+						"o365-license-report" = $LastUpdatedPage.data.attributes.traits."o365-license-report"
+						"o365-license-report-monitoring-disabled" = $LastUpdatedPage.data.attributes.traits."o365-license-report-monitoring-disabled"
+
+						"device-cleanup" = $DeviceCleanupTime
+						"device-cleanup-monitoring-disabled" = $LastUpdatedPage.data.attributes.traits."device-cleanup-monitoring-disabled"
+						"device-usage" = $DeviceUsageTime
+						"device-usage-monitoring-disabled" = $LastUpdatedPage.data.attributes.traits."device-usage-monitoring-disabled"
+						"device-locations" = $DeviceLocationsTime
+						"device-locations-monitoring-disabled" = $LastUpdatedPage.data.attributes.traits."device-locations-monitoring-disabled"
+						"monthly-stats-rollup" = $MonthlyStatsTime
+						"monthly-stats-rollup-monitoring-disabled" = $LastUpdatedPage.data.attributes.traits."monthly-stats-rollup-monitoring-disabled"
+						"billing-update-da" = $BillingUpdateTime
+						"billing-update-da-monitoring-disabled" = $LastUpdatedPage.data.attributes.traits."billing-update-da-monitoring-disabled"
+
+						"contact-cleanup" = $LastUpdatedPage.data.attributes.traits."contact-cleanup"
+						"contact-cleanup-monitoring-disabled" = $LastUpdatedPage.data.attributes.traits."contact-cleanup-monitoring-disabled"
+						"active-directory" = $LastUpdatedPage.data.attributes.traits."active-directory"
+						"active-directory-monitoring-disabled" = $LastUpdatedPage.data.attributes.traits."active-directory-monitoring-disabled"
+						"ad-groups" = $LastUpdatedPage.data.attributes.traits."ad-groups"
+						"ad-groups-monitoring-disabled" = $LastUpdatedPage.data.attributes.traits."ad-groups-monitoring-disabled"
+						"o365-groups" = $LastUpdatedPage.data.attributes.traits."o365-groups"
+						"o365-groups-monitoring-disabled" = $LastUpdatedPage.data.attributes.traits."o365-groups-monitoring-disabled"
+						"hyper-v" = $LastUpdatedPage.data.attributes.traits."hyper-v"
+						"hyper-v-monitoring-disabled" = $LastUpdatedPage.data.attributes.traits."hyper-v-monitoring-disabled"
+						"file-shares" = $LastUpdatedPage.data.attributes.traits."file-shares"
+						"file-shares-monitoring-disabled" = $LastUpdatedPage.data.attributes.traits."file-shares-monitoring-disabled"
+						"licensing-overview" = $LastUpdatedPage.data.attributes.traits."licensing-overview"
+						"licensing-overview-monitoring-disabled" = $LastUpdatedPage.data.attributes.traits."licensing-overview-monitoring-disabled"
+						"meraki-licensing" = $LastUpdatedPage.data.attributes.traits."meraki-licensing"
+						"meraki-licensing-monitoring-disabled" = $LastUpdatedPage.data.attributes.traits."meraki-licensing-monitoring-disabled"
+						"bluebeam-licensing" = $LastUpdatedPage.data.attributes.traits."bluebeam-licensing"
+						"bluebeam-licensing-monitoring-disabled" = $LastUpdatedPage.data.attributes.traits."bluebeam-licensing-monitoring-disabled"
+
+						"custom-scripts" = $LastUpdatedPage.data.attributes.traits."custom-scripts"
+					}
+				}
+			}
+			# Filter out empty values
+			($FlexAssetBody.attributes.traits.GetEnumerator() | Where-Object { -not $_.Value }) | Foreach-Object { 
+				$FlexAssetBody.attributes.traits.Remove($_.Name) 
+			}
+
+			Set-ITGlueFlexibleAssets -id $LastUpdatedPage.data.id -data $FlexAssetBody
+			Write-Host "Updated the 'Scripts - Last Run' page."
+		}
 	}
 
 }
