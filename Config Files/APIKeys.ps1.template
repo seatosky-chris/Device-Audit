@@ -83,3 +83,9 @@ $Email_APIKey = @{
 $Database_Connection = @{
 	ResourceGroup = ""
 }
+
+# $LastUpdatedUpdater_APIURL
+# 
+# The full API URL (with key) for the LastUpdatedAsset_Updater API (an azure function)
+#
+$LastUpdatedUpdater_APIURL = ""
