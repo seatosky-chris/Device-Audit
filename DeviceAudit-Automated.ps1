@@ -107,40 +107,73 @@ if ($AutotaskAPIKey.Key) {
 }
 
 # Get all devices from SC
+$attempt = 10
+while ($attempt -ge 0) {
+	if ($attempt -eq 0) {
+		# Already tried 10x, lets give up and exit the script
+		Write-PSFMessage -Level Error -Message "Could not get device list from ScreenConnect. Exiting..."
+		exit
+	}
 
-# Send a post request to $SCLogin.URL/Services/AuthenticationService.ashx/TryLogin
-# to set the login cookie
-$Nonce = $SC_Nonce # Manually obtained from SC.util.getRandomAlphanumericString(16);  (it just seems to care that the format is correct)
-$FormBody = @(
-	$SCLogin.Username,
-	$SCLogin.Password,
-	$false,
-	$false,
-	$Nonce
-) | ConvertTo-Json
+	# Send a post request to $SCLogin.URL/Services/AuthenticationService.ashx/TryLogin
+	# to set the login cookie
+	$Nonce = $SC_Nonce # Manually obtained from SC.util.getRandomAlphanumericString(16);  (it just seems to care that the format is correct)
+	$FormBody = @(
+		$SCLogin.Username,
+		$SCLogin.Password,
+		$false,
+		$false,
+		$Nonce
+	) | ConvertTo-Json
 
-try {
-	$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/AuthenticationService.ashx/TryLogin" -SessionVariable 'SCWebSession' -Body $FormBody -Method 'POST' -ContentType 'application/json'
-} catch {
-	Write-PSFMessage -Level Error -Message "Failed to connect to: ScreenConnect"
-	Write-PSFMessage -Level Error -Message "Status Code: $($_.Exception.Response.StatusCode.Value__)"
-	Write-PSFMessage -Level Error -Message "Message: $($_.Exception.Message)"
-	Write-PSFMessage -Level Error -Message "Status Description: $($_.Exception.Response.StatusDescription)"
-	Write-PSFMessage -Level Error -Message "URL attempted: $($SCLogin.URL)/Services/AuthenticationService.ashx/TryLogin"
-	Write-PSFMessage -Level Error -Message "Username used: $($SCLogin.Username)"
-}
-if (!$Response) {
-	Write-PSFMessage -Level Error -Message "Failed to connect to: ScreenConnect"
-}
+	try {
+		$AuthResponse = Invoke-WebRequest "$($SCLogin.URL)/Services/AuthenticationService.ashx/TryLogin" -SessionVariable 'SCWebSession' -Body $FormBody -Method 'POST' -ContentType 'application/json'
+	} catch {
+		$attempt--
+		Write-PSFMessage -Level Error -Message "Failed to connect to: ScreenConnect"
+		Write-PSFMessage -Level Error -Message "Status Code: $($_.Exception.Response.StatusCode.Value__)"
+		Write-PSFMessage -Level Error -Message "Message: $($_.Exception.Message)"
+		Write-PSFMessage -Level Error -Message "Status Description: $($_.Exception.Response.StatusDescription)"
+		Write-PSFMessage -Level Error -Message "URL attempted: $($SCLogin.URL)/Services/AuthenticationService.ashx/TryLogin"
+		Write-PSFMessage -Level Error -Message "Username used: $($SCLogin.Username)"
+		start-sleep (get-random -Minimum 10 -Maximum 100)
+		continue
+	}
+	if (!$AuthResponse) {
+		$attempt--
+		Write-PSFMessage -Level Error -Message "Failed to connect to: ScreenConnect"
+		start-sleep (get-random -Minimum 10 -Maximum 100)
+		continue
+	}
 
-# Download the full device list report and then import it
-$Response = Invoke-WebRequest "$($SCLogin.URL)/Report.csv?ReportType=Session&SelectFields=SessionID&SelectFields=Name&SelectFields=GuestMachineName&SelectFields=GuestMachineSerialNumber&SelectFields=GuestHardwareNetworkAddress&SelectFields=GuestOperatingSystemName&SelectFields=GuestLastActivityTime&SelectFields=GuestInfoUpdateTime&SelectFields=GuestLastBootTime&SelectFields=GuestLoggedOnUserName&SelectFields=GuestLoggedOnUserDomain&SelectFields=GuestMachineManufacturerName&SelectFields=GuestMachineModel&SelectFields=GuestMachineDescription&SelectFields=CustomProperty1&Filter=SessionType%20%3D%20'Access'%20AND%20NOT%20IsEnded&AggregateFilter=&ItemLimit=100000" -WebSession $SCWebSession
-$SC_Devices_Full = $Response.Content | ConvertFrom-Csv
+	# Download the full device list report and then import it
+	$Response = Invoke-WebRequest "$($SCLogin.URL)/Report.csv?ReportType=Session&SelectFields=SessionID&SelectFields=Name&SelectFields=GuestMachineName&SelectFields=GuestMachineSerialNumber&SelectFields=GuestHardwareNetworkAddress&SelectFields=GuestOperatingSystemName&SelectFields=GuestLastActivityTime&SelectFields=GuestInfoUpdateTime&SelectFields=GuestLastBootTime&SelectFields=GuestLoggedOnUserName&SelectFields=GuestLoggedOnUserDomain&SelectFields=GuestMachineManufacturerName&SelectFields=GuestMachineModel&SelectFields=GuestMachineDescription&SelectFields=CustomProperty1&Filter=SessionType%20%3D%20'Access'%20AND%20NOT%20IsEnded&AggregateFilter=&ItemLimit=100000" -WebSession $SCWebSession
+	$SC_Devices_Full = $Response.Content | ConvertFrom-Csv
 
-if (!$SC_Devices_Full -or ($SC_Devices_Full | Measure-Object).Count -lt 100 -or ($SC_Devices_Full | Measure-Object).Count -gt 3000) {
-	Write-PSFMessage -Level Error -Message "Failed to get: Device List from ScreenConnect"
-	Write-PSFMessage -Level Error -Message "Response: $($Response | ConvertTo-Json)"
-	Write-PSFMessage -Level Error -Message "SC_Devices_Full: $($SC_Devices_Full | ConvertTo-Json)"
+	# If bad results
+	if (($Response.Headers.Keys.Contains("P3P") -and $Response.Headers.P3P -like "*NON CUR OUR STP STA PRE*") -or 
+		$Response.Headers.'Content-Type' -like "text/html;*" -or 
+		$SC_Devices_Full[0].PSObject.Properties.Name.Count -le 1 -or 
+		$SC_Devices_Full[0].PSObject.Properties.Name -contains "H1") 
+	{
+		$attempt--
+		Write-PSFMessage -Level Error -Message "Failed to get: Device List from ScreenConnect"
+		Write-PSFMessage -Level Error -Message "StatusCode: $($Response.StatusCode)"
+		Write-PSFMessage -Level Error -Message "Message: $($_.Exception.Message)"
+		Write-PSFMessage -Level Error -Message "StatusDescription: $($Response.StatusDescription)"
+
+		Write-PSFMessage -Level Error -Message "Headers: $($Response.Headers | ConvertTo-Json)"
+		Write-PSFMessage -Level Error -Message "Auth Content: $($AuthResponse.RawContent)"
+		Write-PSFMessage -Level Error -Message "Auth Headers: $($AuthResponse.Headers)"
+		Write-PSFMessage -Level Error -Message "BaseResponse: $($Response.BaseResponse | ConvertTo-Json)"
+
+		start-sleep (get-random -Minimum 10 -Maximum 100)
+		continue
+	} else {
+		# Success
+		Write-PSFMessage -Level Verbose -Message "Successfully got $($SC_Devices_Full.Length) devices from ScreenConnect."
+		break
+	}
 }
 
 # Function to convert imported UTC date/times to local time for easier comparisons
@@ -4710,8 +4743,6 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		
 			if (!$LastUpdatedPage -or !$LastUpdatedPage.data) {
 				# Upload new to ITG
-				$FlexAssetBody = 
-			$FlexAssetBody = 
 				$FlexAssetBody = 
 				@{
 					type = 'flexible-assets'
