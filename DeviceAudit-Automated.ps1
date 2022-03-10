@@ -4289,6 +4289,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 					foreach ($Autotask_DeviceID in $MatchedDevice.autotask_matches) {
 						$AutotaskMatch = $Autotask_Devices | Where-Object { $_.id -eq $Autotask_DeviceID }
+						$DeviceLocationsUpdateRan = $true
 						# If currently set location is in $PossibleLocations, dont update
 						if ($AutotaskMatch.companyLocationID -in $PossibleLocations.AutotaskLocation) {
 							continue
@@ -4305,7 +4306,6 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						}
 
 						Set-AutotaskAPIResource -Resource ConfigurationItems -ID $Autotask_DeviceID -body $ConfigurationUpdate | Out-Null
-						$DeviceLocationsUpdateRan = $true
 					}
 				}
 				Write-Progress -Activity "Updating Device Locations" -Status "Ready" -Completed
@@ -4774,7 +4774,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			$Body.Add("device-cleanup", (Get-Date).ToString("yyyy-MM-dd"))
 		}
 		if ($DeviceBillingUpdateRan) {
-			$Body.Add("billing-update-ua", (Get-Date).ToString("yyyy-MM-dd"))
+			$Body.Add("billing-update-da", (Get-Date).ToString("yyyy-MM-dd"))
 		}
 		if ($DeviceUsageUpdateRan) {
 			$Body.Add("device-usage", (Get-Date).ToString("yyyy-MM-dd"))
