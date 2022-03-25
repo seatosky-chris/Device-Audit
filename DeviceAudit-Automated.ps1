@@ -355,11 +355,15 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		}
 	}
 
-	# Get all devices from Autotask
+	# Get all devices from Autotask + locations & contacts for spreadsheet exports
 	$Autotask_Devices = @()
 	if ($AutotaskConnected -and $Autotask_ID) {
 		$Autotask_Devices = Get-AutotaskAPIResource -Resource ConfigurationItems -SimpleSearch "companyID eq $Autotask_ID"
 		$Autotask_Devices = $Autotask_Devices | Where-Object { $_.isActive -eq "True" }
+		$Autotask_Locations = Get-AutotaskAPIResource -Resource CompanyLocations -SimpleSearch "companyID eq $Autotask_ID"
+		$Autotask_Locations = $Autotask_Locations | Where-Object { $_.isActive -eq "True" }
+		$Autotask_Contacts = Get-AutotaskAPIResource -Resource Contacts -SimpleSearch "companyID eq $Autotask_ID"
+		$Autotask_Contacts = $Autotask_Contacts | Where-Object { $_.isActive -eq 1 }
 	}
 
 	Write-Output "Imported all devices."
@@ -3571,6 +3575,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		Write-Host "Building a device list for billing..."
 		$BillingDevices = @()
 		$AllDevices = @()
+		$AssetReport = @()
 		$Now = Get-Date
 
 		foreach ($Device in $MatchedDevices) {
@@ -3585,26 +3590,93 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				$SCDeviceID = if ($ActivityComparison.sc) { $ActivityComparison.sc[0].id } else { $false }
 				$RMMDeviceID = if ($ActivityComparison.rmm) { $ActivityComparison.rmm[0].id } else { $false }
 				$SophosDeviceID = if ($ActivityComparison.sophos) { $ActivityComparison.sophos[0].id } else { $false }
+				$ITGDeviceID = if (($Device.itg_matches | Measure-Object).Count -gt 0) { $Device.itg_matches[0] } else { $false }
+				$AutotaskDeviceID = if (($Device.autotask_matches | Measure-Object).Count -gt 0) { $Device.autotask_matches[0] } else { $false }
 
 				$Hostname = $false
 				$SerialNumber = $false
+				$Location = $false
+				$AssignedUser = $false
 				$DeviceType = $false
 				$LastUser = $false
 				$OperatingSystem = $false
 				$Manufacturer = $false
 				$Model = $false
+				$WarrantyStart = $false
 				$WarrantyExpiry = $false
+				$ReplacementYear = $false
 
 				if ($RMMDeviceID) {
 					$RMMDevice = $RMM_Devices | Where-Object { $_."Device UID" -eq $RMMDeviceID }
 					$Hostname = $RMMDevice."Device Hostname"
 					$SerialNumber = $RMMDevice."Serial Number"
-					$DeviceType = $RMMDevice."Device Type"
 					$LastUser = ($RMMDevice."Last User" -split '\\')[1]
 					$OperatingSystem = $RMMDevice."Operating System"
 					$Manufacturer = $RMMDevice."Manufacturer"
 					$Model = $RMMDevice."Device Model"
 					$WarrantyExpiry = $RMMDevice."Warranty Expiry"
+					$DeviceType = $RMMDevice."Device Type"
+
+					if ($LastUser -and $RMMDevice."Last User" -like "$($Hostname)\*") {
+						$LastUser = "$($LastUser) (Local)"
+					}
+				}
+				if ($AutotaskDeviceID) {
+					$AutotaskDevice = $Autotask_Devices | Where-Object { $_.id -eq $AutotaskDeviceID }
+					if ($AutotaskDevice) {
+						$AutotaskLocation = $Autotask_Locations | Where-Object { $_.id -eq $AutotaskDevice.companyLocationID }
+						$AutotaskContact = $Autotask_Contacts | Where-Object { $_.id -eq $AutotaskDevice.contactID }
+
+						if ($AutotaskLocation) {
+							$Location = $AutotaskLocation.name
+						}
+						if ($AutotaskContact) {
+							$AssignedUser = $AutotaskContact.firstName + " " + $AutotaskContact.lastName
+						}
+						if (!$Hostname) {
+							$Hostname = $AutotaskDevice.rmmDeviceAuditHostname
+						}
+						if (!$Hostname) {
+							$Hostname = $AutotaskDevice.referenceTitle
+						}
+						if (!$SerialNumber) {
+							$SerialNumber = $AutotaskDevice.serialNumber
+						}
+						if (!$LastUser -and $AutotaskDevice.rmmDeviceAuditLastUser) {
+							$LastUser = ($AutotaskDevice.rmmDeviceAuditLastUser -split '\\')[1]
+							if ($LastUser -and $AutotaskDevice.rmmDeviceAuditLastUser -like "$($Hostname)\*") {
+								$LastUser = "$($LastUser) (Local)"
+							}
+						}
+						if (!$OperatingSystem) {
+							$OperatingSystem = $AutotaskDevice.rmmDeviceAuditOperatingSystem
+						}
+						if ($AutotaskDevice.warrantyExpirationDate -and [string]$AutotaskDevice.warrantyExpirationDate -as [DateTime]) {
+							$WarrantyExpiry = $AutotaskDevice.warrantyExpirationDate
+						}
+						$WarrantyStart = ($AutotaskDevice.userDefinedFields | Where-Object { $_.name -eq "Warranty Start Date" }).value
+					}
+				}
+				if ($ITGDeviceID) {
+					$ITGDevice = $ITG_Devices | Where-Object { $_.id -eq $ITGDeviceID }
+					if (!$Location) {
+						$Location = $ITGDevice.attributes."location-name"
+					}
+					if (!$AssignedUser) {
+						$AssignedUser = $ITGDevice.attributes."contact-name"
+					}
+					if (!$SerialNumber) {
+						$SerialNumber = $ITGDevice.attributes.'serial-number'
+					}
+					if (!$DeviceType) {
+						$DeviceType = $ITGDevice.attributes."configuration-type-name"
+					}
+					if (!$WarrantyExpiry) {
+						$WarrantyExpiry = $ITGDevice.attributes.'warranty-expires-at'
+					}
+					if (!$WarrantyStart) {
+						$WarrantyStart = $ITGDevice.attributes.'purchased-at'
+					}
 				}
 				if ($SCDeviceID) {
 					$SCDevice = $SC_Devices | Where-Object { $_.SessionID -eq $SCDeviceID }
@@ -3620,7 +3692,9 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					if (!$LastUser) {
 						$LastUser = $SCDevice.GuestLoggedOnUserName
 					}
-					$OperatingSystem = $SCDevice.GuestOperatingSystemName
+					if ($SCDevice.GuestOperatingSystemName) {
+						$OperatingSystem = $SCDevice.GuestOperatingSystemName
+					}
 					if (!$Manufacturer) {
 						$Manufacturer = $SCDevice.GuestMachineManufacturerName
 					}
@@ -3644,14 +3718,43 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					}
 				}
 
+				
+				if ($WarrantyStart -and [string]$WarrantyStart -as [DateTime]) {
+					$ReplacementYear = (([DateTime]$WarrantyStart).AddYears(5)).Year
+				} elseif ($WarrantyExpiry -and [string]$WarrantyExpiry -as [DateTime]) {
+					$ReplacementYear = (([DateTime]$WarrantyExpiry).AddYears(2)).Year
+				}
+
 				# cleanup data to be more readable
 				if ($Manufacturer) {
 					if ($Manufacturer -like "*/*") {
 						$Manufacturer = ($Manufacturer -split '/')[0]
 					}
 					$Manufacturer = $Manufacturer.Trim()
-					$Manufacturer = $Manufacturer -replace ",? ?(Inc\.?$|Corporation$|Corp\.?$|Ltd\.?$)", ""
+					$ManufacturerCleanup | Foreach-Object { 
+						if ($Manufacturer -like $_.name -or $Manufacturer -match $_.name) {
+							if ($_.caseSensitive) {
+								$Manufacturer = $Manufacturer -creplace $_.name, $_.replacement
+							} else {
+								$Manufacturer = $Manufacturer -replace $_.name, $_.replacement
+							}
+						}
+					}
 					$Manufacturer = $Manufacturer.Trim()
+				}
+
+				if (!$Manufacturer) {
+					$Manufacturer = "Custom Build"
+				}
+				
+				if ($Model) {
+					$Model = $Model -replace "System Product Name", "Custom Build"
+					$Model = $Model -replace "To be filled by O.E.M.", "Custom Build"
+					$Model = $Model -replace $Manufacturer, ""
+					$Model = $Model.Trim();
+				}
+				if (!$Model) {
+					$Model = "Custom Build"
 				}
 
 				if ($SerialNumber) {
@@ -3661,16 +3764,27 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				}
 
 				if ($OperatingSystem) {
-					if ($OperatingSystem -like "Microsoft*") {
+					if ($OperatingSystem -like "Microsoft*" -or $OperatingSystem -like "Windows*") {
 						$OperatingSystem = $OperatingSystem -replace " ?(((\d+)\.*)+)$", ""
+						$OperatingSystem = $OperatingSystem -replace " Service Pack ?\d?\d?$", ""
+						$OperatingSystem = $OperatingSystem -replace "Microsoft ", ""
+						$OperatingSystem = $OperatingSystem -replace "Professional", "Pro"
 					} elseif ($OperatingSystem -like "VMware*") {
 						$OperatingSystem = $OperatingSystem -replace " ?(build\d*) (((\d+)\.*)+)$", ""
+					} elseif ($OperatingSystem -like "Linux*") {
+						if ($OperatingSystem -match "(\w+\s\w+)[^0-9]*(\d\d?).*") {
+							$OperatingSystem = $Matches[1] + " " + $Matches[2]
+						}
 					}
 				}
 
 				if ($WarrantyExpiry) {
 					$WarrantyExpiry = $WarrantyExpiry -replace " UTC$", ""
 					$WarrantyExpiry = ([DateTime]$WarrantyExpiry).ToString("yyyy-MM-dd")
+				}
+				if ($WarrantyStart) {
+					$WarrantyStart = $WarrantyStart -replace " UTC$", ""
+					$WarrantyStart = ([DateTime]$WarrantyStart).ToString("yyyy-MM-dd")
 				}
 
 				if (!$DeviceType) {
@@ -3681,9 +3795,23 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					}
 				}
 
+				if (!$Hostname) { $Hostname = "" }
+				if (!$SerialNumber) { $SerialNumber = "" }
+				if (!$Location) { $Location = "" }
+				if (!$AssignedUser) { $AssignedUser = "" }
+				if (!$DeviceType) { $DeviceType = "" }
+				if (!$LastUser) { $LastUser = "" }
+				if (!$OperatingSystem) { $OperatingSystem = "" }
+				if (!$Manufacturer) { $Manufacturer = "" }
+				if (!$Model) { $Model = "" }
+				if (!$WarrantyStart) { $WarrantyStart = "" }
+				if (!$WarrantyExpiry) { $WarrantyExpiry = "" }
+				if (!$ReplacementYear) { $ReplacementYear = "" }
+
 				# Count as billed if not inactive, ignore devices only in sophos and not seen in the past week as they were likely decommissioned, and
 				# ignore devices that appear to be under the wrong company
 				$Billed = $true
+				$DoAssetReport = $true
 				$BilledStr = "Yes"
 				if ($Timespan.Days -ge $InactiveBillingDays) {
 					$Billed = $false
@@ -3691,10 +3819,12 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				} 
 				if (!$RMMDeviceID -and !$SCDeviceID -and $Timespan.Days -gt 7) {
 					$Billed = $false
+					$DoAssetReport = $false
 					$BilledStr = "No (Decommissioned)"
 				}
 				if ($MoveDevices -and $Device.id -in $MoveDevices.ID) {
 					$Billed = $false
+					$DoAssetReport = $false
 					$BilledStr = "No (Wrong Company?)"
 				}
 
@@ -3730,6 +3860,28 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					SC_Time = if ($ActivityComparison.sc) { $ActivityComparison.sc[0].last_active } else { "NA" }
 					RMM_Time = if ($ActivityComparison.rmm) { $ActivityComparison.rmm[0].last_active } else { "NA" }
 					Sophos_Time = if ($ActivityComparison.sophos) { $ActivityComparison.sophos[0].last_active } else { "NA" }
+				}
+
+				if ($DeviceType -eq "Server" -or $Model -like "*Virtual *" -or !$DoAssetReport) {
+					continue
+				}		
+
+				$AssetReport += [PsCustomObject]@{
+					Device = $Hostname
+					Location = $Location
+					"Assigned User" = $AssignedUser
+					"Last Login" = $LastUser
+					"Active?" = if ($BilledStr -eq "Yes") { "X" } else { "" }
+					Make = $Manufacturer
+					Model = $Model
+					Serial = $SerialNumber
+					"Operating System" = $OperatingSystem
+					Purchased = $WarrantyStart
+					"Warranty Expiry" = $WarrantyExpiry
+					"Replacement Year" = $ReplacementYear
+					"Suggested Replacement" = ""
+					"Replacement Budget" = ""
+					Notes = if ($BilledStr -ne "Yes") { "Last Seen: " + $NewestDate.ToString("yyyy-MM-dd") } else { "" }
 				}
 			}
 		}
@@ -3840,6 +3992,26 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			$excel = $ServerCounts | Export-Excel -PassThru -ExcelPackage $excel -WorksheetName $ws_counts -AutoSize -StartRow 8 -TableName ServerBreakdown -TableStyle "Light21"
 			Add-ExcelTable -PassThru -Range $ws_counts.Cells["A8:B10"] -TableName ServerBreakdown -TableStyle "Light21" -ShowFilter:$false -ShowTotal -ShowFirstColumn -TotalSettings @{"Count" = "Sum"} | Out-Null
 
+			Close-ExcelPackage $excel
+
+			# Create/update a third excel document, the asset report
+			$FileName = "$($Company_Acronym)--Asset_Report.xlsx"
+			$Path = $PSScriptRoot + "\$FileName"
+			Remove-Item $Path -ErrorAction SilentlyContinue
+
+			$excel = $AssetReport | Sort-Object -Property Device | Export-Excel $Path -WorksheetName "Asset Report" -AutoSize -AutoFilter -NoNumberConversion * -TableName "AssetReport" -PassThru
+			$rowCount = ($AssetReport | Measure-Object).Count
+			$curYear = get-date -Format yyyy
+			$ws_report = $excel.Workbook.Worksheets['Asset Report']
+			$ws_report.Cells["K2:K$($rowCount+1)"].Style.HorizontalAlignment="Center"
+			$OrangeColor = [System.Drawing.Color]::FromArgb(255,192,0)
+			$GreenColor = [System.Drawing.Color]::FromArgb(146,208,80)
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "K2:K$($rowCount+1)" -RuleType ContainsBlanks -StopIfTrue
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "K2:K$($rowCount+1)" -RuleType LessThanOrEqual -ForegroundColor black -BackgroundColor red -ConditionValue ($curYear - 3)
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "K2:K$($rowCount+1)" -RuleType Equal -ForegroundColor black -BackgroundColor $OrangeColor -ConditionValue ($curYear - 2)
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "K2:K$($rowCount+1)" -RuleType Equal -ForegroundColor black -BackgroundColor yellow -ConditionValue ($curYear - 1)
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "K2:K$($rowCount+1)" -RuleType GreaterThanOrEqual -ForegroundColor black -BackgroundColor $GreenColor -ConditionValue ($curYear)
+			
 			Close-ExcelPackage $excel
 
 			Write-Host "Device list exported. See: $($FileName)" -ForegroundColor Green
@@ -4022,6 +4194,15 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				} else {
 					Move-Item -Path $Path -Destination $MoveTechList.Location -Force
 				}	
+			}
+			if ($MoveAssetReport.Location -and (Test-Path -Path $MoveAssetReport.Location)) {
+				$FileName = "$($Company_Acronym)--Asset_Report.xlsx"
+				$Path = $PSScriptRoot + "\$FileName"
+				if ($MoveAssetReport.Copy) {
+					Copy-Item -Path $Path -Destination $MoveAssetReport.Location -Force
+				} else {
+					Move-Item -Path $Path -Destination $MoveAssetReport.Location -Force
+				}
 			}
 		} else {
 			Write-Host "Something went wrong! No devices were found for the billing list." -ForegroundColor Red

@@ -63,6 +63,53 @@ $ScriptsLastRunFlexAssetName = "Scripts - Last Run"
 #
 $HyperVRegex = "(-HV\d?\d?)|(-HOST)|(-VHOST\d?\d?)|(^VHOST\d?\d?)$"
 
+####################
+# $ManufacturerCleanup
+#
+# A list of replacements for various Manufacturer entries for cleaning up names
+# "name" can be regex or standard text, used in a string -replace
+# An optional parameter can be added to the hashtable: "caseSensitive", if true 
+#  this will do a case sensitive replacement
+#
+# Example: @(@{name = "ASUSTeK"; replacement = "ASUS"}, @{name = "Hewlett-Packard"; replacement = "HP"}, @{name = "LENOVO"; replacement = "Lenovo"; caseSensitive = $true})
+#
+$ManufacturerCleanup = @(
+  @{
+    name = ",? ?(Inc\.?$|Corporation$|Corp\.?$|Ltd\.?$)"
+    replacement = ""
+  },
+  @{
+    name = "Hewlett-Packard"
+    replacement = "HP"
+  },
+  @{
+    name = "ASUSTeK COMPUTER"
+    replacement = "ASUS"
+  },
+  @{
+    name = "Micro-Star International Co."
+    replacement = "MSI"
+  },
+  @{
+    name = "Gigabyte Technology Co."
+    replacement = "Gigabyte"
+  },
+  @{
+    name = "LENOVO"
+    replacement = "Lenovo"
+    caseSensitive = $true
+  },
+  @{
+    name = "TOSHIBA"
+    replacement = "Toshiba"
+    caseSensitive = $true
+  },
+  @{
+    name = "System manufacturer"
+    replacement = "Custom Build"
+  }
+)
+
 ##################################################################################################################
 ##############################################  EXPORT LOCATIONS  ################################################
 ##################################################################################################################
@@ -100,6 +147,21 @@ $MoveCustomerList = @{
 # }
 #
 $MoveTechList = @{
+	Location = "C:\Users\Administrator\Documents\Device Audits"
+	Copy = $true
+}
+
+####################
+# $MoveAssetReport
+#
+# The location to move the asset report to
+#
+# Example: $MoveAssetReport = @{
+# 	Location = "C:\Users\Administrator\Documents\Device Audits"
+#	  Copy = $false
+# }
+#
+$MoveAssetReport = @{
 	Location = "C:\Users\Administrator\Documents\Device Audits"
 	Copy = $true
 }
