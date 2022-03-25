@@ -1372,7 +1372,11 @@ if ($DODuplicateSearch) {
 				foreach ($OrderedDevice in $OrderedDevices) {
 					$SCDevice = $SC_Devices | Where-Object { $_.SessionID -eq $OrderedDevice.id }
 					$Deleted = $false
-					if ($i -gt 0 -and !$ReadOnly) {
+					$AllowDeletion = $true
+					if ($DontAutoDelete -and ($DontAutoDelete.Hostnames -contains $SCDevice.Name -or $DontAutoDelete.SC -contains $SCDevice.Name -or $DontAutoDelete.SC -contains $OrderedDevice.id)) {
+						$AllowDeletion = $false
+					}
+					if ($i -gt 0 -and !$ReadOnly -and $AllowDeletion) {
 						$Deleted = delete_from_sc -SC_ID $OrderedDevice.id  -SCWebSession $SCWebSession
 						if ($Deleted) {
 							log_change -Company_Acronym $Company_Acronym -ServiceTarget "sc" -RMM_Device_ID $Device.rmm_matches -SC_Device_ID $OrderedDevice.id -Sophos_Device_ID $Device.sophos_matches -ChangeType "delete" -Hostname $SCDevice.Name -Reason "Duplicate"
@@ -1398,7 +1402,11 @@ if ($DODuplicateSearch) {
 				foreach ($OrderedDevice in $OrderedDevices) {
 					$RMMDevice = $RMM_Devices | Where-Object { $_."Device UID" -eq $OrderedDevice.id }
 					$Deleted = $false
-					if ($i -gt 0 -and !$ReadOnly -and !$RMMDevice.ToDelete) {
+					$AllowDeletion = $true
+					if ($DontAutoDelete -and ($DontAutoDelete.Hostnames -contains $RMMDevice."Device Hostname" -or $DontAutoDelete.RMM -contains $RMMDevice."Device Hostname" -or $DontAutoDelete.RMM -contains $OrderedDevice.id)) {
+						$AllowDeletion = $false
+					}
+					if ($i -gt 0 -and !$ReadOnly -and !$RMMDevice.ToDelete -and $AllowDeletion) {
 						delete_from_rmm -RMM_Device_ID $OrderedDevice.id
 						$Deleted = "Set DeleteMe UDF"
 						log_change -Company_Acronym $Company_Acronym -ServiceTarget "rmm" -RMM_Device_ID $OrderedDevice.id -SC_Device_ID $Device.sc_matches -Sophos_Device_ID $Device.sophos_matches  -ChangeType "delete" -Hostname $RMMDevice."Device Hostname" -Reason "Duplicate"
@@ -2033,7 +2041,11 @@ if ($DOInactiveSearch) {
 				$DeleteSC = "No"
 				if ($SCDeviceID -and !$RMMOnly) {
 					$DeleteSC = "Yes, manually delete"
-					if (!$ReadOnly) {
+					$AllowDeletion = $true
+					if ($DontAutoDelete -and ($DontAutoDelete.Hostnames -contains $SCDevice.Hostname -or $DontAutoDelete.SC -contains $SCDevice.Hostname -or $DontAutoDelete.SC -contains $SCDeviceID)) {
+						$AllowDeletion = $false
+					}
+					if (!$ReadOnly -and $AllowDeletion) {
 						$Deleted = delete_from_sc -SC_ID $SCDeviceID  -SCWebSession $SCWebSession
 						if ($Deleted) {
 							$DeleteSC = "Yes, auto attempted"
@@ -2044,7 +2056,11 @@ if ($DOInactiveSearch) {
 
 				$DeleteRMM = "No"
 				if ($RMMDeviceID) {
-					if (!$ReadOnly -and !$RMMDevice.ToDelete) {
+					$AllowDeletion = $true
+					if ($DontAutoDelete -and ($DontAutoDelete.Hostnames -contains $RMMDevice."Device Hostname" -or $DontAutoDelete.RMM -contains $RMMDevice."Device Hostname" -or $DontAutoDelete.RMM -contains $RMMDeviceID)) {
+						$AllowDeletion = $false
+					}
+					if (!$ReadOnly -and !$RMMDevice.ToDelete -and $AllowDeletion) {
 						delete_from_rmm -RMM_Device_ID $RMMDeviceID						
 						$DeleteRMM = "Yes, udf set for deletion"
 						log_change -Company_Acronym $Company_Acronym -ServiceTarget "rmm" -RMM_Device_ID $RMMDeviceID -SC_Device_ID $Device.sc_matches -Sophos_Device_ID $Device.sophos_matches -ChangeType "delete" -Hostname $SCDevice.Name -Reason "Inactive"
@@ -2058,7 +2074,11 @@ if ($DOInactiveSearch) {
 				$DeleteSophos = "No"
 				if ($SophosDeviceID -and !$RMMOnly) {
 					$DeleteSophos = "Yes, manually delete if decommed"
-					if ($InactiveAutoDeleteSophos -and !$ReadOnly -and $Timespan.Days -gt $InactiveAutoDeleteSophos) {
+					$AllowDeletion = $true
+					if ($DontAutoDelete -and ($DontAutoDelete.Hostnames -contains $SophosDevice.hostname -or $DontAutoDelete.Sophos -contains $SophosDevice.hostname -or $DontAutoDelete.Sophos -contains $SophosDeviceID)) {
+						$AllowDeletion = $false
+					}
+					if ($InactiveAutoDeleteSophos -and !$ReadOnly -and $Timespan.Days -gt $InactiveAutoDeleteSophos -and $AllowDeletion) {
 						$Deleted = delete_from_sophos -Sophos_Device_ID $SophosDeviceID -TenantApiHost $TenantApiHost -SophosHeader $SophosHeader
 						if ($Deleted) {
 							$DeleteSophos = "Yes, auto attempted"

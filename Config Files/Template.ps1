@@ -134,7 +134,7 @@ $Device_Whitelist = @()
 
 
 ##################################################################################################################
-################################################  IGNORE INSTALLS  ###############################################
+########################################  INSTALL / DELETE CUSTOMIZATIONS  #######################################
 ##################################################################################################################
 
 # $Ignore_Installs
@@ -151,6 +151,27 @@ $Device_Whitelist = @()
 # }
 #
 $Ignore_Installs =  @{
+	SC = @()
+	RMM = @()
+	Sophos = @()
+}
+
+# $DontAutoDelete
+#
+# Don't auto delete these devices.
+# Either put the hostname under the Hostnames array, this will block auto deletion for all devices in all systems with that hostname,
+# or put the devices id or hostname under a system array (like it's done in $Ignore_Installs), and it will block auto deletions for that specific system
+# This is particularly useful for EOC devices which may not turn on very often
+#
+# Example: $DontAutoDelete =  @{
+#	Hostnames = @("EOC1")
+#	SC = @()
+#	RMM = @()
+#	Sophos = @()
+# }
+#
+$DontAutoDelete =  @{
+	Hostnames = @()
 	SC = @()
 	RMM = @()
 	Sophos = @()
@@ -225,7 +246,7 @@ $InactiveDeleteDaysRMM = 120
 # Be careful with this, it should have a high threshold. We don't want to delete a device that still exists and has Sophos installed.
 # Set to $false to disable Sophos auto deletion entirely
 #
-$InactiveAutoDeleteSophos = 365
+$InactiveAutoDeleteSophos = $false
 
 # $InactiveBillingDays
 #
