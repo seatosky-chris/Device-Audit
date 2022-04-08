@@ -781,7 +781,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 		# Sophos to SC Matches
 		if ($IgnoreSC -notcontains $false -and ($Device.hostname -in $MatchedDevices.sc_hostname -or $CleanDeviceName -in ($MatchedDevices.sc_hostname -replace '\W', '') -or 
-			($Device.hostname.length -gt 15 -and (($MatchedDevices.sc_hostname | Where-Object { $Device.hostname -like "$_*" }).count -gt 0))))
+			($Device.hostname.length -gt 15 -and (($MatchedDevices.sc_hostname | Where-Object { $Device.hostname -like "$([Management.Automation.WildcardPattern]::Escape($_))*" }).count -gt 0))))
 		{
 			$RelatedDevices += ($MatchedDevices | Where-Object { 
 				($Device.hostname -in $_.sc_hostname -or $CleanDeviceName -in ($_.sc_hostname -replace '\W', '')) -and 
@@ -792,7 +792,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			# Try a partial hostname match for long hostnames (where they might get cutoff)
 			if ($Device.hostname.length -gt 15) {
 				$RelatedDevices += ($MatchedDevices | Where-Object { 
-					($_.sc_hostname | Where-Object { $Device.hostname -like "$_*" }).count -gt 0 -and 
+					($_.sc_hostname | Where-Object { $Device.hostname -like "$([Management.Automation.WildcardPattern]::Escape($_))*" }).count -gt 0 -and 
 					(!$_.sc_matches -or !$IgnoreSC -or ($_.sc_matches | Where-Object { $_ -notin $IgnoreSC })) -and 
 				(!$_.rmm_matches -or !$IgnoreRMM -or ($_.rmm_matches | Where-Object { $_ -notin $IgnoreRMM })) -and
 					($IgnoreRMM -notcontains $false -or !$_.rmm_matches) -and ($IgnoreSC -notcontains $false -or !$_.sc_matches)
@@ -802,7 +802,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 		# Sophos to RMM Matches
 		if ($IgnoreRMM -notcontains $false -and ($Device.hostname -in $MatchedDevices.rmm_hostname -or $CleanDeviceName -in ($MatchedDevices.rmm_hostname -replace '\W', '') -or
-			($Device.hostname.length -gt 15 -and ($MatchedDevices.rmm_hostname | Where-Object { $Device.hostname -like "$_*" }).count -gt 0))) 
+			($Device.hostname.length -gt 15 -and ($MatchedDevices.rmm_hostname | Where-Object { $Device.hostname -like "$([Management.Automation.WildcardPattern]::Escape($_))*" }).count -gt 0))) 
 		{
 			$RelatedDevices += ($MatchedDevices | Where-Object { 
 				($Device.hostname -in $_.rmm_hostname -or $CleanDeviceName -in ($_.rmm_hostname -replace '\W', '')) -and 
@@ -813,7 +813,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			# Try a partial hostname match for long hostnames (where they might get cutoff)
 			if (!$RelatedDevices -and $Device.hostname.length -gt 15) {
 				$RelatedDevices += ($MatchedDevices | Where-Object { 
-					($_.rmm_hostname | Where-Object { $Device.hostname -like "$_*" }).count -gt 0 -and 
+					($_.rmm_hostname | Where-Object { $Device.hostname -like "$([Management.Automation.WildcardPattern]::Escape($_))*" }).count -gt 0 -and 
 					(!$_.sc_matches -or !$IgnoreSC -or ($_.sc_matches | Where-Object { $_ -notin $IgnoreSC })) -and 
 				(!$_.rmm_matches -or !$IgnoreRMM -or ($_.rmm_matches | Where-Object { $_ -notin $IgnoreRMM })) -and
 					($IgnoreRMM -notcontains $false -or !$_.rmm_matches) -and ($IgnoreSC -notcontains $false -or !$_.sc_matches)
