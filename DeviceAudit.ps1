@@ -2889,6 +2889,60 @@ if ($DOUsageDBSave) {
 	Write-Host "===================="
 }
 
+# Save Sophos Tamper Protection keys (once a week)
+$SophosTamperKeysJson = $SophosTamperKeys = @()
+if ($Sophos_Company -and $Sophos_Devices -and $SophosTenantID -and $TenantApiHost) {
+	$SophosTamperKeysJsonPath = "$($SophosTamperKeysLocation)\$($Company_Acronym)_keys.json"
+	if ($SophosTamperKeysLocation -and (Test-Path -Path $SophosTamperKeysJsonPath)) {
+		$SophosTamperKeysJson = Get-Content -Path $SophosTamperKeysJsonPath -Raw | ConvertFrom-Json
+	}
+
+	if (!$SophosTamperKeysJson -or (Get-Date $SophosTamperKeysJson.lastUpdated.DateTime).AddDays(7) -lt (Get-Date)) {
+		$SophosTamperKeys = [System.Collections.ArrayList]@()
+
+		$SophosDeviceCount = ($Sophos_Devices | Measure-Object).Count
+		$i = 0
+		foreach ($Device in $Sophos_Devices) {
+			$i++
+			[int]$PercentComplete = ($i / $SophosDeviceCount * 100)
+			Write-Progress -Activity "Retrieving Sophos Tamper Protection Keys" -PercentComplete $PercentComplete -Status ("Working - " + $PercentComplete + "%")
+
+			# Refresh token if it has expired
+			if ($SophosToken.expiry -lt (Get-Date)) {
+				$SophosToken = Invoke-RestMethod -Method POST -Body $SophosGetTokenBody -ContentType "application/x-www-form-urlencoded" -uri "https://id.sophos.com/api/v2/oauth2/token"
+				$SophosJWT = $SophosToken.access_token
+				$SophosToken | Add-Member -NotePropertyName expiry -NotePropertyValue $null
+				$SophosToken.expiry = (Get-Date).AddSeconds($SophosToken.expires_in)
+			}
+
+			$SophosHeader = @{
+				Authorization = "Bearer $SophosJWT"
+				"X-Tenant-ID" = $SophosTenantID
+			}
+			$SophosTamperInfo = Invoke-RestMethod -Method GET -Headers $SophosHeader -uri ($TenantApiHost + "/endpoint/v1/endpoints/$($Device.id)/tamper-protection")
+
+			if ($SophosTamperInfo -and $SophosTamperInfo.password) {
+				$SophosTamperKeys.Add([PsCustomObject]@{
+					id = $Device.id
+					password = $SophosTamperInfo.password
+					enabled = $SophosTamperInfo.enabled
+				}) | Out-Null;
+			}
+		}
+
+		if ($SophosTamperKeys.Count -gt 0) {
+			@{
+				keys = $SophosTamperKeys
+				lastUpdated = (Get-Date)
+			} | ConvertTo-Json | Out-File -FilePath $SophosTamperKeysJsonPath
+			Write-Host "Exported Sophos Tamper Protection keys."
+		}
+		Write-Progress -Activity "Retrieving Sophos Tamper Protection Keys" -Status "Ready" -Completed
+	} elseif ($SophosTamperKeysJson -and $SophosTamperKeysJson.keys) {
+		$SophosTamperKeys = $SophosTamperKeysJson.keys;
+	}
+}
+
 # Get a count and full list of devices that have been used in the last $InactiveBillingDays for billing
 if ($DOBillingExport) {
 	Write-Host "Building a device list for billing..."
@@ -2924,6 +2978,8 @@ if ($DOBillingExport) {
 			$WarrantyStart = $false
 			$WarrantyExpiry = $false
 			$ReplacementYear = $false
+			$SophosTamperKey = $false
+			$SophosTamperStatus = $false
 
 			if ($RMMDeviceID) {
 				$RMMDevice = $RMM_Devices | Where-Object { $_."Device UID" -eq $RMMDeviceID }
@@ -3035,6 +3091,12 @@ if ($DOBillingExport) {
 				if (!$OperatingSystem) {
 					$OperatingSystem = $SophosDevice.OS
 				}
+
+				if ($SophosTamperKeys -and $SophosTamperKeys.id -contains $SophosDeviceID) {
+					$SophosTamperInfo = $SophosTamperKeys | Where-Object { $_.id -eq $SophosDeviceID }
+					$SophosTamperKey = $SophosTamperInfo.password
+					$SophosTamperStatus = $SophosTamperInfo.enabled
+				}
 			}
 
 			if ($WarrantyStart -and [string]$WarrantyStart -as [DateTime]) {
@@ -3125,6 +3187,7 @@ if ($DOBillingExport) {
 			if (!$WarrantyStart) { $WarrantyStart = "" }
 			if (!$WarrantyExpiry) { $WarrantyExpiry = "" }
 			if (!$ReplacementYear) { $ReplacementYear = "" }
+			if (!$SophosTamperKey) { $SophosTamperKey = "" }
 
 			# Count as billed if not inactive, ignore devices only in sophos and not seen in the past week as they were likely decommissioned, and
 			# ignore devices that appear to be under the wrong company
@@ -3178,6 +3241,8 @@ if ($DOBillingExport) {
 				SC_Time = if ($ActivityComparison.sc) { $ActivityComparison.sc[0].last_active } else { "NA" }
 				RMM_Time = if ($ActivityComparison.rmm) { $ActivityComparison.rmm[0].last_active } else { "NA" }
 				Sophos_Time = if ($ActivityComparison.sophos) { $ActivityComparison.sophos[0].last_active } else { "NA" }
+				SophosTamperProtectionKey = $SophosTamperKey
+				SophosTamperStatus = if ($SophosTamperStatus) { "On" } else { "Off" }
 			}
 
 			if ($DeviceType -eq "Server" -or $Model -like "*Virtual *" -or !$DoAssetReport) {

@@ -215,6 +215,15 @@ $HistoryLocation = "C:\Users\Administrator\Documents\DeviceAuditHistory"
 $LogLocation = "C:\Users\Administrator\Documents\Device Audit\Logs"
 
 ####################
+# $SophosTamperKeysLocation
+#
+# The location to store a json file of Sophos Tamper Protection keys
+#
+# Example: $SophosTamperKeysLocation = "C:\seatosky\SophosTamperKeys"
+#
+$SophosTamperKeysLocation = "C:\Users\Administrator\Documents\Device Audit\SophosTamperKeys"
+
+####################
 # $DeviceUsersLocation
 #
 # The location to store a list of all the users using each computer

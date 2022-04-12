@@ -5,6 +5,7 @@ ErrorLogs/
 History/
 WAN_LAN_History/
 DeviceUsers/
+SophosTamperKeys/
 Config Files/*
 Config Files/Archive
 *.lnk
