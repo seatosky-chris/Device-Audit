@@ -106,6 +106,50 @@ if ($AutotaskAPIKey.Key) {
 	$AutotaskConnected = $true
 }
 
+# Connect to Sophos
+$SophosTenantID = $false
+$SophosGetTokenBody = @{
+	grant_type = "client_credentials"
+	client_id = $SophosAPIKey.ClientID
+	client_secret = $SophosAPIKey.Secret
+	scope = "token"
+}
+$SophosToken = Invoke-RestMethod -Method POST -Body $SophosGetTokenBody -ContentType "application/x-www-form-urlencoded" -uri "https://id.sophos.com/api/v2/oauth2/token"
+$SophosJWT = $SophosToken.access_token
+$SophosToken | Add-Member -NotePropertyName expiry -NotePropertyValue $null
+$SophosToken.expiry = (Get-Date).AddSeconds($SophosToken.expires_in - 60)
+
+if ($SophosJWT) {
+	# Get our partner ID
+	$SophosHeader = @{
+		Authorization = "Bearer $SophosJWT"
+	}
+	$SophosPartnerInfo = Invoke-RestMethod -Method GET -Headers $SophosHeader -uri "https://api.central.sophos.com/whoami/v1"
+	$SophosPartnerID = $SophosPartnerInfo.id
+
+	if ($SophosPartnerID) {
+		# Get list of tenants, so we can get the companies ID in sophos
+		$SophosHeader = @{
+			Authorization = "Bearer $SophosJWT"
+			"X-Partner-ID" = $SophosPartnerID
+		}
+		$SophosTenants = Invoke-RestMethod -Method GET -Headers $SophosHeader -uri "https://api.central.sophos.com/partner/v1/tenants?pageTotal=true"
+
+		if ($SophosTenants.pages -and $SophosTenants.pages.total -gt 1) {
+			$TotalPages = $SophosTenants.pages.total
+			for ($i = 2; $i -le $TotalPages; $i++) {
+				$SophosTenants.items += (Invoke-RestMethod -Method GET -Headers $SophosHeader -uri "https://api.central.sophos.com/partner/v1/tenants?page=$i").items
+			}
+		} else {
+			Write-PSFMessage -Level Error -Message "Failed to connect to: Sophos (No Tenants Found)"
+		}
+	} else {
+		Write-PSFMessage -Level Error -Message "Failed to connect to: Sophos (No Partner ID)"
+	}
+} else {
+	Write-PSFMessage -Level Error -Message "Failed to connect to: Sophos (No JWT)"
+}
+
 # Get all devices from SC
 $attempt = 10
 while ($attempt -ge 0) {
@@ -205,58 +249,24 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	# Connect to the Sophos API to get the device list from Sophos
 	############
 
-	# Get token
-	$SophosTenantID = $false
-	$Body = @{
-		grant_type = "client_credentials"
-		client_id = $SophosAPIKey.ClientID
-		client_secret = $SophosAPIKey.Secret
-		scope = "token"
+	# Refresh token if it has expired
+	if ($SophosToken.expiry -lt (Get-Date)) {
+		$SophosToken = Invoke-RestMethod -Method POST -Body $SophosGetTokenBody -ContentType "application/x-www-form-urlencoded" -uri "https://id.sophos.com/api/v2/oauth2/token"
+		$SophosJWT = $SophosToken.access_token
+		$SophosToken | Add-Member -NotePropertyName expiry -NotePropertyValue $null
+		$SophosToken.expiry = (Get-Date).AddSeconds($SophosToken.expires_in)
 	}
-	$SophosToken = Invoke-RestMethod -Method POST -Body $Body -ContentType "application/x-www-form-urlencoded" -uri "https://id.sophos.com/api/v2/oauth2/token"
-	$SophosJWT = $SophosToken.access_token
 
-	if ($SophosJWT) {
-		# Get our partner ID
-		$SophosHeader = @{
-			Authorization = "Bearer $SophosJWT"
-		}
-		$SophosPartnerInfo = Invoke-RestMethod -Method GET -Headers $SophosHeader -uri "https://api.central.sophos.com/whoami/v1"
-		$SophosPartnerID = $SophosPartnerInfo.id
-
-		if ($SophosPartnerID) {
-			# Get list of tenants, so we can get the companies ID in sophos
-			$SophosHeader = @{
-				Authorization = "Bearer $SophosJWT"
-				"X-Partner-ID" = $SophosPartnerID
-			}
-			$SophosTenants = Invoke-RestMethod -Method GET -Headers $SophosHeader -uri "https://api.central.sophos.com/partner/v1/tenants?pageTotal=true"
-
-			if ($SophosTenants.pages -and $SophosTenants.pages.total -gt 1) {
-				$TotalPages = $SophosTenants.pages.total
-				for ($i = 2; $i -le $TotalPages; $i++) {
-					$SophosTenants.items += (Invoke-RestMethod -Method GET -Headers $SophosHeader -uri "https://api.central.sophos.com/partner/v1/tenants?page=$i").items
-				}
-			} else {
-				Write-PSFMessage -Level Error -Message "Failed to connect to: Sophos (No Tenants Found)"
-			}
-
-			# Get the tenants ID and URL
-			if ($SophosTenants.items -and $Sophos_Company) {
-				$CompanyInfo = $SophosTenants.items | Where-Object { $_.name -like $Sophos_Company }
-				$SophosTenantID = $CompanyInfo.id
-				$TenantApiHost = $CompanyInfo.apiHost
-			} else {
-				Write-PSFMessage -Level Error -Message "Failed to connect to: Sophos (Tenant not found)"
-			}
-		} else {
-			Write-PSFMessage -Level Error -Message "Failed to connect to: Sophos (No Partner ID)"
-		}
+	# Get the tenants ID and URL
+	if ($SophosTenants  -and $SophosTenants.items -and $Sophos_Company) {
+		$CompanyInfo = $SophosTenants.items | Where-Object { $_.name -like $Sophos_Company }
+		$SophosTenantID = $CompanyInfo.id
+		$TenantApiHost = $CompanyInfo.apiHost
 	} else {
-		Write-PSFMessage -Level Error -Message "Failed to connect to: Sophos (No JWT)"
+		Write-PSFMessage -Level Error -Message "Failed to connect to: Sophos (Tenant not found)"
 	}
 
-	# Finally get the Sophos endpoints
+	# Get the Sophos endpoints
 	$SophosEndpoints = $false
 	if ($SophosTenantID -and $TenantApiHost) {
 		$SophosHeader = @{

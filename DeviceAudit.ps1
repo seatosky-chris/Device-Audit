@@ -135,6 +135,8 @@ $Body = @{
 }
 $SophosToken = Invoke-RestMethod -Method POST -Body $Body -ContentType "application/x-www-form-urlencoded" -uri "https://id.sophos.com/api/v2/oauth2/token"
 $SophosJWT = $SophosToken.access_token
+$SophosToken | Add-Member -NotePropertyName expiry -NotePropertyValue $null
+$SophosToken.expiry = (Get-Date).AddSeconds($SophosToken.expires_in - 60)
 
 if ($SophosJWT) {
 	# Get our partner ID
