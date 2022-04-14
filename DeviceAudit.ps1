@@ -58,6 +58,8 @@ if ($AutotaskAPIKey.Key) {
 	$AutotaskConnected = $true
 }
 
+# Get all devices from RMM
+$RMM_Devices = @()
 if ($RMM_ID) {
 	If (Get-Module -ListAvailable -Name "DattoRMM") {Import-module DattoRMM -Force} Else { install-module DattoRMM -Force; import-module DattoRMM -Force}
 	Set-DrmmApiParameters -Url $DattoAPIKey.URL -Key $DattoAPIKey.Key -SecretKey $DattoAPIKey.SecretKey
@@ -66,12 +68,7 @@ if ($RMM_ID) {
 		$CompanyInfo = Get-DrmmAccountSites | Where-Object { $_.id -eq $RMM_ID }
 		$RMM_ID = $CompanyInfo.uid
 	}
-}
-
-if ($RMM_ID) {
 	$RMM_Devices = Get-DrmmSiteDevices $RMM_ID | Where-Object { $_.deviceClass -eq 'device' -and $_.deviceType.category -in @("Laptop", "Desktop", "Server") }
-} else {
-	$RMM_Devices = Import-Csv $RMM_CSV
 }
 
 # Get all devices from ITG
@@ -208,7 +205,7 @@ if ($SophosEndpoints -and $SophosEndpoints.items) {
 
 
 # Get RMM device details if using the API
-if ($RMM_ID) {
+if ($RMM_Devices) {
 	$i = 0
 	foreach ($Device in $RMM_Devices) {
 		$i++
@@ -258,38 +255,22 @@ $SC_Devices | ForEach-Object {
 	$_.GuestLastSeen = $MostRecentDate
 }
 
-if (!$RMM_ID) {											
-	$RMM_Devices = $RMM_Devices | Where-Object { $_."Device Type" -in @("Laptop", "Desktop", "Server") } |
-							Select-Object "Device UID", "Device Hostname", "Serial Number", 
-											@{Name="MacAddresses"; E={ @(($_."MAC Address(es)" -replace "^\[", '' -replace "\]$", '' -split ', ') | ForEach-Object { @{macAddress = $_} }) }}, 
-											"Device Type", "Status", "Last Seen", @{Name="extIpAddress"; E={$_."Ext IP Addr"}}, @{Name="intIpAddress"; E={$_."Int IP Address"}},
-											"Last User", Domain, "Operating System", Manufacturer, "Device Model", @{Name="Warranty Expiry"; E= {$_."Warranty Exp. Date"}}, "Device Description", 
-											@{Name="ScreenConnectID"; E={
-												if ($_.ScreenConnect -and $_.ScreenConnect -like "*$($SCLogin.URL.TrimStart('http').TrimStart('s').TrimStart('://'))*") {
-													$Found = $_.ScreenConnect -match '\/\/((\{){0,1}[0-9a-fA-F]{8}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{12}(\}){0,1})\/Join'
-													if ($Found -and $Matches[1]) {
-														$Matches[1]
-													}
-												}
-											}}, @{Name="ToDelete"; E={$false}}, @{Name="suspended"; E={"False"}}
+$RMM_Devices = $RMM_Devices |
+					Select-Object @{Name="Device UID"; E={$_.uid}}, @{Name="Device Hostname"; E={$_.hostname}}, @{Name="Serial Number"; E={$_.serialNumber}}, MacAddresses, 
+									@{Name="Device Type"; E={$_.deviceType.category}}, @{Name="Status"; E={$_.online}}, @{Name="Last Seen"; E={ if ($_.online -eq "True") { Get-Date } else { Convert-UTCtoLocal(([datetime]'1/1/1970').AddMilliseconds($_.lastSeen)) } }}, 
+									extIpAddress, intIpAddress,
+									@{Name="Last User"; E={$_.lastLoggedInUser}}, Domain, @{Name="Operating System"; E={$_.operatingSystem}}, 
+									Manufacturer, @{Name="Device Model"; E={$_.model}}, @{Name="Warranty Expiry"; E={$_.warrantyDate}}, @{Name="Device Description"; E={$_.description}}, 
+									@{Name="ScreenConnectID"; E={
+										$SC = $_.udf.udf13;
+										if ($SC -and $SC -like "*$($SCLogin.URL.TrimStart('http').TrimStart('s').TrimStart('://'))*") {
+											$Found = $SC -match '\/\/((\{){0,1}[0-9a-fA-F]{8}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{12}(\}){0,1})\/Join'
+											if ($Found -and $Matches[1]) {
+												$Matches[1]
+											}
+										}
+									}}, @{Name="ToDelete"; E={ if ($_.udf.udf30 -eq "True") { $true } else { $false } }}, suspended
 
-} else {
-	$RMM_Devices = $RMM_Devices |
-							Select-Object @{Name="Device UID"; E={$_.uid}}, @{Name="Device Hostname"; E={$_.hostname}}, @{Name="Serial Number"; E={$_.serialNumber}}, MacAddresses, 
-											@{Name="Device Type"; E={$_.deviceType.category}}, @{Name="Status"; E={$_.online}}, @{Name="Last Seen"; E={ if ($_.online -eq "True") { Get-Date } else { Convert-UTCtoLocal(([datetime]'1/1/1970').AddMilliseconds($_.lastSeen)) } }}, 
-											extIpAddress, intIpAddress,
-											@{Name="Last User"; E={$_.lastLoggedInUser}}, Domain, @{Name="Operating System"; E={$_.operatingSystem}}, 
-											Manufacturer, @{Name="Device Model"; E={$_.model}}, @{Name="Warranty Expiry"; E={$_.warrantyDate}}, @{Name="Device Description"; E={$_.description}}, 
-											@{Name="ScreenConnectID"; E={
-												$SC = $_.udf.udf13;
-												if ($SC -and $SC -like "*$($SCLogin.URL.TrimStart('http').TrimStart('s').TrimStart('://'))*") {
-													$Found = $SC -match '\/\/((\{){0,1}[0-9a-fA-F]{8}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{12}(\}){0,1})\/Join'
-													if ($Found -and $Matches[1]) {
-														$Matches[1]
-													}
-												}
-											}}, @{Name="ToDelete"; E={ if ($_.udf.udf30 -eq "True") { $true } else { $false } }}, suspended
-}
 $Sophos_Devices = $Sophos_Devices | Select-Object id, @{Name="hostname"; E={$_.hostname -replace '[^\x00-\x7F]+', ''}}, macAddresses, 
 										@{Name="type"; E={if ($_.type -eq "computer") { "Workstation"} else { "Server" }}}, 
 										lastSeenAt, @{Name="LastUser"; E={($_.associatedPerson.viaLogin -split '\\')[1]}}, @{Name="OS"; E={if ($_.os.name) { $_.os.name } else { "$($_.os.platform) $($_.os.majorVersion).$($_.os.minorVersion)" }}}
