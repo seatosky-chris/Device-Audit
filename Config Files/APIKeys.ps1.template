@@ -89,3 +89,15 @@ $Database_Connection = @{
 # The full API URL (with key) for the LastUpdatedAsset_Updater API (an azure function)
 #
 $LastUpdatedUpdater_APIURL = ""
+
+
+# RapidAPI_Creds
+#
+# The credentials for RapidAPI for the CPU Data API
+# Used to grab data on CPU's for performance metrics
+# See: https://rapidapi.com/ranjian0/api/cpu-data/
+#
+$RapidAPI_Creds = @{
+	Host = ""
+	Key = ""
+}

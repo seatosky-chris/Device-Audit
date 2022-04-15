@@ -84,6 +84,56 @@ if (Test-Path "$PSScriptRoot\Config Files\AzureServiceAccount.json") {
 	Save-AzContext -Path "$PSScriptRoot\Config Files\AzureServiceAccount.json"
 }
 
+# Get CPU data and Download new CPU data if older than 2 weeks
+if ($CPUDataLocation -and (Test-Path -Path ($CPUDataLocation + "\lastUpdated.txt"))) {
+	$CPUDataLastUpdated = Get-Content -Path ($CPUDataLocation + "\lastUpdated.txt") -Raw
+	if ([string]$CPUDataLastUpdated -as [DateTime])   {
+		$CPUDataLastUpdated = Get-Date $CPUDataLastUpdated
+	} else {
+		$CPUDataLastUpdated = $false
+	}
+}
+
+if ($CPUDataLocation -and (Test-Path -Path ($CPUDataLocation + "\cpus.json"))) {
+	$CPUDetails = Get-Content -Path ($CPUDataLocation + "\cpus.json") -Raw | ConvertFrom-Json
+} else {
+	$CPUDetails = @()
+}
+
+if ($CPUDataLastUpdated -and $CPUDataLastUpdated.AddDays(14) -lt (Get-Date)) {
+	$NewCPUList = [System.Collections.ArrayList]@()
+	$headers=@{}
+	$headers.Add("X-RapidAPI-Host", $RapidAPI_Creds.Host)
+	$headers.Add("X-RapidAPI-Key", $RapidAPI_Creds.Key)
+
+	foreach ($CPUName in $CPUNameSearch) {
+		$response = Invoke-RestMethod -Uri "https://$($RapidAPI_Creds.Host)/cpus/search/?name=$($CPUName)" -Method GET -Headers $headers
+		$response | Foreach-Object { $NewCPUList.Add($_) } | Out-Null
+		Start-Sleep -Seconds 2 # we are rate limited to 1 call per second
+	}
+
+	(Get-Date).ToString() | Out-File -FilePath ($CPUDataLocation + "\lastUpdated.txt")
+
+	if ($CPUDetails -and $CPUDetails.ID) {
+		$CPUDetails = [System.Collections.ArrayList]@($CPUDetails)
+		foreach ($NewCPU in $NewCPUList) {
+			if ($NewCPU.ID -in $CPUDetails.ID) {
+				$OldCPUEntry = $CPUDetails | Where-Object { $_.ID -eq $NewCPU.ID }
+				if ($OldCPUEntry.CPUMark -ne $NewCPU.CPUMark) {
+					($CPUDetails | Where-Object { $_.ID -eq $NewCPU.ID }).CPUMark = $NewCPU.CPUMark
+				}
+			} else {
+				$CPUDetails.Add($NewCPU) 
+			}
+		}
+	} else {
+		$CPUDetails = $NewCPUList
+	}
+
+	$CPUDetails = $CPUDetails | Sort-Object -Unique -Property ID
+	$CPUDetails | ConvertTo-Json | Out-File -FilePath ($CPUDataLocation + "\cpus.json")
+}
+
 # Connect to IT Glue
 $ITGConnected = $false
 if ($ITGAPIKey.Key) {
@@ -191,7 +241,7 @@ while ($attempt -ge 0) {
 	}
 
 	# Download the full device list report and then import it
-	$Response = Invoke-WebRequest "$($SCLogin.URL)/Report.csv?ReportType=Session&SelectFields=SessionID&SelectFields=Name&SelectFields=GuestMachineName&SelectFields=GuestMachineSerialNumber&SelectFields=GuestHardwareNetworkAddress&SelectFields=GuestOperatingSystemName&SelectFields=GuestLastActivityTime&SelectFields=GuestInfoUpdateTime&SelectFields=GuestLastBootTime&SelectFields=GuestLoggedOnUserName&SelectFields=GuestLoggedOnUserDomain&SelectFields=GuestMachineManufacturerName&SelectFields=GuestMachineModel&SelectFields=GuestMachineDescription&SelectFields=CustomProperty1&Filter=SessionType%20%3D%20'Access'%20AND%20NOT%20IsEnded&AggregateFilter=&ItemLimit=100000" -WebSession $SCWebSession
+	$Response = Invoke-WebRequest "$($SCLogin.URL)/Report.csv?ReportType=Session&SelectFields=SessionID&SelectFields=Name&SelectFields=GuestMachineName&SelectFields=GuestMachineSerialNumber&SelectFields=GuestHardwareNetworkAddress&SelectFields=GuestOperatingSystemName&SelectFields=GuestLastActivityTime&SelectFields=GuestInfoUpdateTime&SelectFields=GuestLastBootTime&SelectFields=GuestLoggedOnUserName&SelectFields=GuestLoggedOnUserDomain&SelectFields=GuestMachineManufacturerName&SelectFields=GuestMachineModel&SelectFields=GuestMachineDescription&SelectFields=CustomProperty1&SelectFields=GuestSystemMemoryTotalMegabytes&SelectFields=GuestProcessorName&SelectFields=GuestProcessorVirtualCount&Filter=SessionType%20%3D%20'Access'%20AND%20NOT%20IsEnded&AggregateFilter=&ItemLimit=100000" -WebSession $SCWebSession
 	$SC_Devices_Full = $Response.Content | ConvertFrom-Csv
 
 	# If bad results
@@ -343,6 +393,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			$Device | Add-Member -NotePropertyName manufacturer -NotePropertyValue $false
 			$Device | Add-Member -NotePropertyName model -NotePropertyValue $false
 			$Device | Add-Member -NotePropertyName MacAddresses -NotePropertyValue @()
+			$Device | Add-Member -NotePropertyName memory -NotePropertyValue $false
+			$Device | Add-Member -NotePropertyName cpus -NotePropertyValue $false
+			$Device | Add-Member -NotePropertyName cpuCores -NotePropertyValue $false
+			$Device | Add-Member -NotePropertyName url -NotePropertyValue $false
 
 			$AuditDevice = Get-DrmmAuditDevice $Device.uid
 			if ($AuditDevice) {
@@ -350,6 +404,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				$Device.manufacturer = $AuditDevice.systemInfo.manufacturer
 				$Device.model = $AuditDevice.systemInfo.model
 				$Device.MacAddresses = @($AuditDevice.nics | Select-Object instance, macAddress)
+				$Device.memory = $AuditDevice.systemInfo.totalPhysicalMemory
+				$Device.cpus = $AuditDevice.processors
+				$Device.cpuCores = $AuditDevice.systemInfo.totalCpuCores
+				$Device.url = $AuditDevice.portalUrl
 			}
 		}
 		Write-Progress -Activity "Getting RMM device details" -Status "Ready" -Completed
@@ -393,7 +451,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	$SC_Devices = $SC_Devices | Select-Object SessionID, Name, GuestMachineName, GuestMachineSerialNumber, GuestHardwareNetworkAddress, 
 												@{Name="DeviceType"; E={if ($_.GuestOperatingSystemName -like "*Server*") { "Server" } else { "Workstation" } }}, 
 												@{Name="GuestLastActivityTime"; E={Convert-UTCtoLocal($_.GuestLastActivityTime)}}, @{Name="GuestInfoUpdateTime"; E={Convert-UTCtoLocal($_.GuestInfoUpdateTime)}}, @{Name="GuestLastBootTime"; E={Convert-UTCtoLocal($_.GuestLastBootTime)}},
-												GuestLoggedOnUserName, GuestLoggedOnUserDomain, GuestOperatingSystemName, GuestMachineManufacturerName, GuestMachineModel, GuestMachineDescription
+												GuestLoggedOnUserName, GuestLoggedOnUserDomain, GuestOperatingSystemName, GuestMachineManufacturerName, GuestMachineModel, GuestMachineDescription, GuestSystemMemoryTotalMegabytes, GuestProcessorName, GuestProcessorVirtualCount
 	# Sometimes the LastActivityTime field is not set even though the device is on, in these cases it's set to Year 1 
 	# Also, if a computer is online but inactive, the infoupdate time can be more recent and a better option
 	# We'll create a new GuestLastSeen property here that is the most recent date of the 3 available
@@ -403,21 +461,22 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		$_.GuestLastSeen = $MostRecentDate
 	}
 
-		$RMM_Devices = $RMM_Devices |
-							Select-Object @{Name="Device UID"; E={$_.uid}}, @{Name="Device Hostname"; E={$_.hostname}}, @{Name="Serial Number"; E={$_.serialNumber}}, MacAddresses, 
-											@{Name="Device Type"; E={$_.deviceType.category}}, @{Name="Status"; E={$_.online}}, @{Name="Last Seen"; E={ if ($_.online -eq "True") { Get-Date } else { Convert-UTCtoLocal(([datetime]'1/1/1970').AddMilliseconds($_.lastSeen)) } }}, 
-											extIpAddress, intIpAddress,
-											@{Name="Last User"; E={$_.lastLoggedInUser}}, Domain, @{Name="Operating System"; E={$_.operatingSystem}}, 
-											Manufacturer, @{Name="Device Model"; E={$_.model}}, @{Name="Warranty Expiry"; E={$_.warrantyDate}}, @{Name="Device Description"; E={$_.description}}, 
-											@{Name="ScreenConnectID"; E={
-												$SC = $_.udf.udf13;
-												if ($SC -and $SC -like "*$($SCLogin.URL.TrimStart('http').TrimStart('s').TrimStart('://'))*") {
-													$Found = $SC -match '\/\/((\{){0,1}[0-9a-fA-F]{8}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{12}(\}){0,1})\/Join'
-													if ($Found -and $Matches[1]) {
-														$Matches[1]
-													}
+	$RMM_Devices = $RMM_Devices |
+						Select-Object @{Name="Device UID"; E={$_.uid}}, @{Name="Device Hostname"; E={$_.hostname}}, @{Name="Serial Number"; E={$_.serialNumber}}, MacAddresses, 
+										@{Name="Device Type"; E={$_.deviceType.category}}, @{Name="Status"; E={$_.online}}, @{Name="Last Seen"; E={ if ($_.online -eq "True") { Get-Date } else { Convert-UTCtoLocal(([datetime]'1/1/1970').AddMilliseconds($_.lastSeen)) } }}, 
+										extIpAddress, intIpAddress,
+										@{Name="Last User"; E={$_.lastLoggedInUser}}, Domain, @{Name="Operating System"; E={$_.operatingSystem}}, 
+										Manufacturer, @{Name="Device Model"; E={$_.model}}, @{Name="Warranty Expiry"; E={$_.warrantyDate}}, @{Name="Device Description"; E={$_.description}}, 
+										memory, cpus, cpuCores, url,
+										@{Name="ScreenConnectID"; E={
+											$SC = $_.udf.udf13;
+											if ($SC -and $SC -like "*$($SCLogin.URL.TrimStart('http').TrimStart('s').TrimStart('://'))*") {
+												$Found = $SC -match '\/\/((\{){0,1}[0-9a-fA-F]{8}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{12}(\}){0,1})\/Join'
+												if ($Found -and $Matches[1]) {
+													$Matches[1]
 												}
-											}}, @{Name="ToDelete"; E={ if ($_.udf.udf30 -eq "True") { $true } else { $false } }}, suspended
+											}
+										}}, @{Name="ToDelete"; E={ if ($_.udf.udf30 -eq "True") { $true } else { $false } }}, suspended
 	
 	$Sophos_Devices = $Sophos_Devices | Select-Object id, @{Name="hostname"; E={$_.hostname -replace '[^\x00-\x7F]+', ''}}, macAddresses, 
 											@{Name="type"; E={if ($_.type -eq "computer") { "Workstation"} else { "Server" }}}, 
@@ -1479,6 +1538,81 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			return $false
 		}
 	}
+
+	# Levenshtein distance function for comparing similarity between two strings
+	function Measure-StringDistance {
+		<#
+			.SYNOPSIS
+				Compute the distance between two strings using the Levenshtein distance formula.
+			
+			.DESCRIPTION
+				Compute the distance between two strings using the Levenshtein distance formula.
+
+			.PARAMETER Source
+				The source string.
+
+			.PARAMETER Compare
+				The comparison string.
+
+			.EXAMPLE
+				PS C:\> Measure-StringDistance -Source "Michael" -Compare "Micheal"
+
+				2
+
+				There are two characters that are different, "a" and "e".
+
+			.EXAMPLE
+				PS C:\> Measure-StringDistance -Source "Michael" -Compare "Michal"
+
+				1
+
+				There is one character that is different, "e".
+
+			.NOTES
+				Author:
+				Michael West
+		#>
+
+		[CmdletBinding(SupportsShouldProcess=$true)]
+		[OutputType([int])]
+		param (
+			[Parameter(ValueFromPipelineByPropertyName=$true)]
+			[string]$Source = "",
+			[string]$Compare = ""
+		)
+		$n = $Source.Length;
+		$m = $Compare.Length;
+		$d = New-Object 'int[,]' $($n+1),$($m+1)
+			
+		if ($n -eq 0){
+		return $m
+		}
+		if ($m -eq 0){
+			return $n
+		}
+
+		for ([int]$i = 0; $i -le $n; $i++){
+			$d[$i, 0] = $i
+		}
+		for ([int]$j = 0; $j -le $m; $j++){
+			$d[0, $j] = $j
+		}
+
+		for ([int]$i = 1; $i -le $n; $i++){
+			for ([int]$j = 1; $j -le $m; $j++){
+				if ($Compare[$($j - 1)] -eq $Source[$($i - 1)]){
+					$cost = 0
+				}
+				else{
+					$cost = 1
+				}
+				$d[$i, $j] = [Math]::Min([Math]::Min($($d[$($i-1), $j] + 1), $($d[$i, $($j-1)] + 1)),$($d[$($i-1), $($j-1)]+$cost))
+			}
+		}
+			
+		return $d[$n, $m]
+	}
+
 
 	# Find any duplicates that need to be removed
 	if ($DODuplicateSearch) {
@@ -3662,6 +3796,11 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				$OperatingSystem = $false
 				$Manufacturer = $false
 				$Model = $false
+				$CPUs = $false
+				$CPUCores = $false
+				$CPUName = $false
+				$CPUScore = $false
+				$RAM = $false
 				$WarrantyStart = $false
 				$WarrantyExpiry = $false
 				$ReplacementYear = $false
@@ -3678,6 +3817,9 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					$Model = $RMMDevice."Device Model"
 					$WarrantyExpiry = $RMMDevice."Warranty Expiry"
 					$DeviceType = $RMMDevice."Device Type"
+					$CPUs = @($RMMDevice.cpus.name)
+					$CPUCores = $RMMDevice.cpuCores
+					$RAM = [math]::Round($RMMDevice.memory / 1024 / 1024 / 1024) # bytes to GB
 
 					if ($LastUser -and $RMMDevice."Last User" -like "$($Hostname)\*") {
 						$LastUser = "$($LastUser) (Local)"
@@ -3763,6 +3905,15 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					if (!$Model) {
 						$Model = $SCDevice.GuestMachineModel
 					}
+					if (!$CPUs) {
+						$CPUs = @($SCDevice.GuestProcessorName)
+					}
+					if (!$CPUCores) {
+						$CPUCores = @($SCDevice.GuestProcessorVirtualCount)
+					}
+					if (!$RAM) {
+						$RAM = [math]::Round($SCDevice.GuestSystemMemoryTotalMegabytes / 1024)
+					}
 				}
 				if ($SophosDeviceID) {
 					$SophosDevice = $Sophos_Devices | Where-Object { $_.id -eq $SophosDeviceID }
@@ -3789,8 +3940,62 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				
 				if ($WarrantyStart -and [string]$WarrantyStart -as [DateTime]) {
 					$ReplacementYear = (([DateTime]$WarrantyStart).AddYears(5)).Year
+					$AgeDiff = NEW-TIMESPAN -Start $WarrantyStart -End (Get-Date)
+					$DeviceAge = [math]::Round($AgeDiff.Days / 360)
 				} elseif ($WarrantyExpiry -and [string]$WarrantyExpiry -as [DateTime]) {
 					$ReplacementYear = (([DateTime]$WarrantyExpiry).AddYears(2)).Year
+					$AgeDiff = NEW-TIMESPAN -Start (([DateTime]$WarrantyExpiry).AddYears(-2)) -End (Get-Date)
+					$DeviceAge = [math]::Round($AgeDiff.Days / 360)
+				}
+
+				# get cpu performance score
+				if ($CPUs) {
+					foreach ($CPU in $CPUs) {
+						$CleanName = $CPU -replace [regex]::escape("(R)"), "" -replace [regex]::escape("(C)"), "" -replace [regex]::escape("(TM)"), "" -replace "CPU", "" -replace '\s+', ' '
+						$CPUMatch = $CPUDetails | Where-Object { $_.Name -like $CleanName }
+						if (!$CPUMatch) {
+							$CPUMatch = $CPUDetails | Where-Object { ($_.Name -replace "-", " ") -like ($CleanName -replace "-", " ") }
+						}
+						if (!$CPUMatch) {
+							$CPUMatch = $CPUDetails | Where-Object { $CleanName -like ($_.Name + "*") -or $CleanName -like ("*" + $_.Name) }
+						}
+						if (!$CPUMatch) {
+							$CPUMatch = $CPUDetails | Where-Object { $CleanName -like ("*" + $_.Name + "*") }
+						}
+						if (!$CPUMatch) {
+							$CPUMatch = $CPUDetails | Where-Object { $_.Name -like ("*" + $CleanName + "*") }
+						}
+	
+						if (($CPUMatch | Measure-Object).Count -gt 1) {
+							if ($CPUMatch.Cores -contains $CPUCores) {
+								$CPUMatch = $CPUMatch | Where-Object { $_.Cores -eq $CPUCores }
+							}
+						}
+
+						if (($CPUMatch | Measure-Object).Count -gt 1) {
+							$BestMatch = $false
+							$BestScore = 999
+							foreach ($Match in $CPUMatch) {
+								$Distance = Measure-StringDistance -Source $Match.Name -Compare $CleanName
+								if ($Distance -lt $BestScore) {
+									$BestMatch = $Match
+									$BestScore = $Distance
+								}
+							}
+							if ($BestMatch) {
+								$CPUMatch = $BestMatch
+							} else {
+								$CPUMatch = $CPUMatch | Select-Object -First 1
+							}
+						}
+
+						if ($CPUMatch -and (!$CPUScore -or $CPUMatch.CPUMark -gt $CPUScore)) {
+							$CPUName = $CPUMatch.Name
+							$CPUScore = $CPUMatch.CPUMark
+						} elseif (!$CPUName) {
+							$CPUName = $CleanName
+						}
+					}
 				}
 
 				# cleanup data to be more readable
@@ -3831,6 +4036,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					}
 				}
 
+				if ($RAM) {
+					$RAM = [string]$RAM + " GB"
+				}
+
 				if ($OperatingSystem) {
 					if ($OperatingSystem -like "Microsoft*" -or $OperatingSystem -like "Windows*") {
 						$OperatingSystem = $OperatingSystem -replace " ?(((\d+)\.*)+)$", ""
@@ -3855,6 +4064,8 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					$WarrantyStart = ([DateTime]$WarrantyStart).ToString("yyyy-MM-dd")
 				}
 
+
+
 				if (!$DeviceType) {
 					if ($OperatingSystem -and $OperatingSystem -like "*Server*") {
 						$DeviceType = "Server"
@@ -3872,6 +4083,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				if (!$OperatingSystem) { $OperatingSystem = "" }
 				if (!$Manufacturer) { $Manufacturer = "" }
 				if (!$Model) { $Model = "" }
+				if (!$CPUName) { $CPUName = "" }
+				if (!$CPUScore) { $CPUScore = "" }
+				if (!$RAM) { $RAM = "" }
+				if (!$DeviceAge) { $DeviceAge = "" }
 				if (!$WarrantyStart) { $WarrantyStart = "" }
 				if (!$WarrantyExpiry) { $WarrantyExpiry = "" }
 				if (!$ReplacementYear) { $ReplacementYear = "" }
@@ -3947,8 +4162,12 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					Model = $Model
 					Serial = $SerialNumber
 					"Operating System" = $OperatingSystem
+					RAM = $RAM
+					CPU = $CPUName
+					"CPU Performance" = $CPUScore
 					Purchased = $WarrantyStart
 					"Warranty Expiry" = $WarrantyExpiry
+					"Age (years)" = $DeviceAge
 					"Replacement Year" = $ReplacementYear
 					"Suggested Replacement" = ""
 					"Replacement Budget" = ""
@@ -4074,14 +4293,26 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			$rowCount = ($AssetReport | Measure-Object).Count
 			$curYear = get-date -Format yyyy
 			$ws_report = $excel.Workbook.Worksheets['Asset Report']
-			$ws_report.Cells["K2:K$($rowCount+1)"].Style.HorizontalAlignment="Center"
+			$ws_report.Cells["P2:P$($rowCount+1)"].Style.HorizontalAlignment="Center"
 			$OrangeColor = [System.Drawing.Color]::FromArgb(255,192,0)
 			$GreenColor = [System.Drawing.Color]::FromArgb(146,208,80)
-			Add-ConditionalFormatting -Worksheet $ws_report -Address "K2:K$($rowCount+1)" -RuleType ContainsBlanks -StopIfTrue
-			Add-ConditionalFormatting -Worksheet $ws_report -Address "K2:K$($rowCount+1)" -RuleType LessThanOrEqual -ForegroundColor black -BackgroundColor red -ConditionValue ($curYear - 3)
-			Add-ConditionalFormatting -Worksheet $ws_report -Address "K2:K$($rowCount+1)" -RuleType Equal -ForegroundColor black -BackgroundColor $OrangeColor -ConditionValue ($curYear - 2)
-			Add-ConditionalFormatting -Worksheet $ws_report -Address "K2:K$($rowCount+1)" -RuleType Equal -ForegroundColor black -BackgroundColor yellow -ConditionValue ($curYear - 1)
-			Add-ConditionalFormatting -Worksheet $ws_report -Address "K2:K$($rowCount+1)" -RuleType GreaterThanOrEqual -ForegroundColor black -BackgroundColor $GreenColor -ConditionValue ($curYear)
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "P2:P$($rowCount+1)" -RuleType ContainsBlanks -StopIfTrue
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "P2:P$($rowCount+1)" -RuleType LessThanOrEqual -ForegroundColor black -BackgroundColor red -ConditionValue ($curYear - 3)
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "P2:P$($rowCount+1)" -RuleType Equal -ForegroundColor black -BackgroundColor $OrangeColor -ConditionValue ($curYear - 2)
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "P2:P$($rowCount+1)" -RuleType Equal -ForegroundColor black -BackgroundColor yellow -ConditionValue ($curYear - 1)
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "P2:P$($rowCount+1)" -RuleType GreaterThanOrEqual -ForegroundColor black -BackgroundColor $GreenColor -ConditionValue ($curYear)
+
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "I2:I$($rowCount+1)" -RuleType ContainsText -ForegroundColor black -BackgroundColor red -ConditionValue "Windows XP"
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "I2:I$($rowCount+1)" -RuleType ContainsText -ForegroundColor black -BackgroundColor red -ConditionValue "Windows Vista"
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "I2:I$($rowCount+1)" -RuleType ContainsText -ForegroundColor black -BackgroundColor red -ConditionValue "Windows 7"
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "I2:I$($rowCount+1)" -RuleType ContainsText -ConditionValue "Windows 8.1" -StopIfTrue
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "I2:I$($rowCount+1)" -RuleType ContainsText -ForegroundColor black -BackgroundColor yellow -ConditionValue "Windows 8"
+
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "J2:J$($rowCount+1)" -RuleType Equal -ForegroundColor black -BackgroundColor red -ConditionValue "4 GB"
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "J2:J$($rowCount+1)" -RuleType Equal -ForegroundColor black -BackgroundColor red -ConditionValue "3 GB"
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "J2:J$($rowCount+1)" -RuleType Equal -ForegroundColor black -BackgroundColor red -ConditionValue "2 GB"
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "J2:J$($rowCount+1)" -RuleType Equal -ForegroundColor black -BackgroundColor red -ConditionValue "1 GB"
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "J2:J$($rowCount+1)" -RuleType Equal -ForegroundColor black -BackgroundColor red -ConditionValue "0 GB"
 			
 			Close-ExcelPackage $excel
 

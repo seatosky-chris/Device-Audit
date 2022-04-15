@@ -110,6 +110,17 @@ $ManufacturerCleanup = @(
   }
 )
 
+####################
+# $CPUNameSearch
+#
+# The RapidAPI CPU Data API will be searched for all CPU's with the following words in the name
+# Ideally we want to keep this list concise and have each word search a large amount of CPU's
+# because the default limit is 100 calls per month to the API (beyond that you must pay for access)
+#
+# Example: $CPUNameSearch = @("AMD", "Apple", "ARM", "Intel")
+#
+$CPUNameSearch = @("AArch", "AMD", "Apple", "ARM", "Athlon", "Celeron", "Intel", "Pentium", "VIA")
+
 ##################################################################################################################
 ##############################################  EXPORT LOCATIONS  ################################################
 ##################################################################################################################
@@ -222,6 +233,15 @@ $LogLocation = "C:\Users\Administrator\Documents\Device Audit\Logs"
 # Example: $SophosTamperKeysLocation = "C:\seatosky\SophosTamperKeys"
 #
 $SophosTamperKeysLocation = "C:\Users\Administrator\Documents\Device Audit\SophosTamperKeys"
+
+####################
+# $CPUDataLocation
+#
+# The location to store a list of CPU details (to query against for performance metrics)
+#
+# Example: $CPUDataLocation = "C:\seatosky\CPUData"
+#
+$CPUDataLocation = "C:\Users\Administrator\Documents\Device Audit\CPUData"
 
 ####################
 # $DeviceUsersLocation
