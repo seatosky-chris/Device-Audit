@@ -6,7 +6,7 @@
 . "$PSScriptRoot\Config Files\Global-Config.ps1" # Global Config
 . "$PSScriptRoot\Config Files\APIKeys.ps1" # API Keys
 
-. "$PSScriptRoot\Config Files\Config-CD.ps1" # Company config (CHANGE THIS)
+. "$PSScriptRoot\Config Files\Config-CCL.ps1" # Company config (CHANGE THIS)
 #####################################################################
 
 # This line allows popup boxes to work
@@ -3092,6 +3092,7 @@ if ($DOBillingExport) {
 			$CPUs = $false
 			$CPUCores = $false
 			$CPUName = $false
+			$CPUReleaseDate = $false
 			$CPUScore = $false
 			$RAM = $false
 			$WarrantyStart = $false
@@ -3231,16 +3232,6 @@ if ($DOBillingExport) {
 				}
 			}
 
-			if ($WarrantyStart -and [string]$WarrantyStart -as [DateTime]) {
-				$ReplacementYear = (([DateTime]$WarrantyStart).AddYears(5)).Year
-				$AgeDiff = NEW-TIMESPAN -Start $WarrantyStart -End (Get-Date)
-				$DeviceAge = [math]::Round($AgeDiff.Days / 360)
-			} elseif ($WarrantyExpiry -and [string]$WarrantyExpiry -as [DateTime]) {
-				$ReplacementYear = (([DateTime]$WarrantyExpiry).AddYears(2)).Year
-				$AgeDiff = NEW-TIMESPAN -Start (([DateTime]$WarrantyExpiry).AddYears(-2)) -End (Get-Date)
-				$DeviceAge = [math]::Round($AgeDiff.Days / 360)
-			}
-
 			# get cpu performance score
 			if ($CPUs) {
 				foreach ($CPU in $CPUs) {
@@ -3285,8 +3276,32 @@ if ($DOBillingExport) {
 					if ($CPUMatch -and (!$CPUScore -or $CPUMatch.CPUMark -gt $CPUScore)) {
 						$CPUName = $CPUMatch.Name
 						$CPUScore = $CPUMatch.CPUMark
+						$CPUReleaseDate = $CPUMatch.Release
 					} elseif (!$CPUName) {
 						$CPUName = $CleanName
+					}
+				}
+			}
+
+			# calculate device age and replacement date
+			if ($WarrantyStart -and [string]$WarrantyStart -as [DateTime]) {
+				$ReplacementYear = (([DateTime]$WarrantyStart).AddYears(5)).Year
+				$AgeDiff = NEW-TIMESPAN -Start $WarrantyStart -End (Get-Date)
+				$DeviceAge = [math]::Round($AgeDiff.Days / 360)
+			} elseif ($WarrantyExpiry -and [string]$WarrantyExpiry -as [DateTime]) {
+				$ReplacementYear = (([DateTime]$WarrantyExpiry).AddYears(2)).Year
+				$AgeDiff = NEW-TIMESPAN -Start (([DateTime]$WarrantyExpiry).AddYears(-2)) -End (Get-Date)
+				$DeviceAge = [math]::Round($AgeDiff.Days / 360)
+			} elseif ($CPUReleaseDate) {
+				$MatchFound = $CPUReleaseDate -match "Q(\d) (\d{4})"
+				if ($MatchFound) {
+					[int]$ReleaseQuarter = $Matches[1]
+					[int]$ReleaseYear = $Matches[2]
+					if ($ReleaseQuarter -gt 0 -and $ReleaseYear -gt 0) {
+						$ReleaseDate = Get-Date -Year $ReleaseYear -Month ((($ReleaseQuarter - 1) * 3) + 1)
+						$ReplacementYear = (($ReleaseDate).AddYears(5)).Year
+						$AgeDiff = NEW-TIMESPAN -Start $ReleaseDate -End (Get-Date)
+						$DeviceAge = [math]::Round($AgeDiff.Days / 360)
 					}
 				}
 			}
@@ -3377,7 +3392,7 @@ if ($DOBillingExport) {
 			if (!$CPUName) { $CPUName = "" }
 			if (!$CPUScore) { $CPUScore = "" }
 			if (!$RAM) { $RAM = "" }
-			if (!$DeviceAge) { $DeviceAge = "" }
+			if (!$DeviceAge -and $DeviceAge -isnot [int]) { $DeviceAge = "" }
 			if (!$WarrantyStart) { $WarrantyStart = "" }
 			if (!$WarrantyExpiry) { $WarrantyExpiry = "" }
 			if (!$ReplacementYear) { $ReplacementYear = "" }
