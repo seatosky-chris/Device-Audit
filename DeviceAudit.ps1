@@ -137,8 +137,11 @@ if ($AutotaskConnected -and $Autotask_ID) {
 	$Autotask_Devices = $Autotask_Devices | Where-Object { $_.isActive -eq "True" }
 	$Autotask_Locations = Get-AutotaskAPIResource -Resource CompanyLocations -SimpleSearch "companyID eq $Autotask_ID"
 	$Autotask_Locations = $Autotask_Locations | Where-Object { $_.isActive -eq "True" }
+	$DefaultAutotaskLocation = $Autotask_Locations | Where-Object { $_.isPrimary -eq "True" } | Select-Object -First 1
 	$Autotask_Contacts = Get-AutotaskAPIResource -Resource Contacts -SimpleSearch "companyID eq $Autotask_ID"
 	$Autotask_Contacts = $Autotask_Contacts | Where-Object { $_.isActive -eq 1 }
+	# $Autotask_Contracts = Get-AutotaskAPIResource -Resource Contracts -SimpleSearch "companyID eq $Autotask_ID"
+	# $Autotask_Contract = $Autotask_Contracts | Where-Object { $_.isDefaultContract -eq "True" }
 }
 
 # Get all devices from SC
@@ -3010,6 +3013,10 @@ if ($Sophos_Company -and $Sophos_Devices -and $SophosTenantID -and $TenantApiHos
 	if ($SophosTamperKeysLocation -and (Test-Path -Path $SophosTamperKeysJsonPath)) {
 		$SophosTamperKeysJson = Get-Content -Path $SophosTamperKeysJsonPath -Raw | ConvertFrom-Json
 	}
+	$AllowTamperProtectionDisabled = $false
+	if ($Allow_Tamper_Protection_Disabled.count -gt 0 -and $Allow_Tamper_Protection_Disabled[0] -eq "*") {
+		$AllowTamperProtectionDisabled = $true
+	}
 
 	if (!$SophosTamperKeysJson -or (Get-Date $SophosTamperKeysJson.lastUpdated.DateTime).AddDays(7) -lt (Get-Date)) {
 		$SophosTamperKeys = [System.Collections.ArrayList]@()
@@ -3041,6 +3048,80 @@ if ($Sophos_Company -and $Sophos_Devices -and $SophosTenantID -and $TenantApiHos
 					password = $SophosTamperInfo.password
 					enabled = $SophosTamperInfo.enabled
 				}) | Out-Null;
+			}
+
+			if (!$SophosTamperInfo.enabled) {
+				# Sophos tamper protection is not enabled, has it been disabled for more than a week?
+				$OneMonthAgo = [int](New-TimeSpan -Start (Get-Date "01/01/1970") -End (Get-Date).AddDays(-30).ToUniversalTime()).TotalSeconds
+				$OneWeek = [int](New-TimeSpan -Start (Get-Date).AddDays(-7).ToUniversalTime() -End (Get-Date).ToUniversalTime()).TotalSeconds
+
+				$FilterQuery_Params = @{
+					LogHistory = $LogHistory
+					StartTime = $OneMonthAgo
+					EndTime = 'now'
+					ServiceTarget = 'sophos'
+					Sophos_Device_ID = $Device.id
+					ChangeType = 'sophos_tamper_disabled'
+					Hostname = $Device.hostname
+					Reason = "Sophos Tamper Protection is Disabled"
+				}
+				$TamperProtectionDisabled = log_query @FilterQuery_Params
+				log_change -Company_Acronym $Company_Acronym -ServiceTarget "sophos" -RMM_Device_ID $false -SC_Device_ID $false -Sophos_Device_ID $Device.id -ChangeType "sophos_tamper_disabled" -Hostname $Device.hostname -Reason "Sophos Tamper Protection is Disabled"
+
+				if (($TamperProtectionDisabled | Measure-Object).count -ge 2 -and (log_time_diff($TamperProtectionDisabled)) -ge $OneWeek -and 
+					$Device.hostname -notin $Allow_Tamper_Protection_Disabled -and $Device.id -notin $Allow_Tamper_Protection_Disabled -and !$AllowTamperProtectionDisabled
+				) {
+					$MatchedDevice = $MatchedDevices | Where-Object { $_.sophos_matches -contains $Device.id }
+					$LastSeen = Get-Date $Device.lastSeenAt
+					
+					if ((($MatchedDevice.sc_matches | Measure-Object).count -ge 0 -or ($MatchedDevice.rmm_matches | Measure-Object).count -ge 0) -and $LastSeen -gt (Get-Date).AddDays(-3)) {
+						# Disabled for over 1 week, turn tamper protection back on (only if in rmm or sc and active in sophos, otherwise this device may have been decommissioned)
+						$PostBody = @{
+							enabled = $true
+							regeneratePassword = $false
+						}
+						$TamperProtectionResponse = Invoke-RestMethod -Method POST -Headers $SophosHeader -uri ($TenantApiHost + "/endpoint/v1/endpoints/$($Device.id)/tamper-protection") -Body ($PostBody | ConvertTo-Json) -ContentType "application/json"
+
+						if ($TamperProtectionResponse.enabled -and !$TamperProtectionResponse.error) {
+							Write-Host "Re-enabled Sophos Tamper Protection on: $($Device.hostname)"
+						} else {
+							# Failed to re-enabled tamper protection, create a ticket
+						}
+					}
+
+					# Disabled for over 1 week, create a ticket if we haven't already recently
+					# $FilterQuery_Params = @{
+					# 	LogHistory = $LogHistory
+					# 	StartTime = $OneMonthAgo
+					# 	EndTime = 'now'
+					# 	ServiceTarget = 'sophos'
+					# 	Sophos_Device_ID = $Device.id
+					# 	ChangeType = 'sophos_tamper_email'
+					# 	Hostname = $Device.hostname
+					# 	Reason = "Sophos Tamper Protection is Disabled, Email Sent"
+					# }
+					# $SentTamperEmails = log_query @FilterQuery_Params
+	
+					# if (($SentTamperEmails | Measure-Object).count -eq 0) {
+					# 	# Send ticket
+					# 	$NewTicketBody = [PSCustomObject]@{
+					# 		companyID = $Autotask_ID
+					# 		companyLocationID = if ($DefaultAutotaskLocation) { $DefaultAutotaskLocation.id } else { 10 }
+					# 		priority = 3
+					# 		status = 1
+					# 		queueID = 29682833
+					# 		issueType = 33
+					# 		subIssueType = 231
+					# 		seviceLevelAgreementID = 5
+					# 		contractID = if ($Autotask_Contract) { $Autotask_Contract } else { $null }
+					# 		title = "Sophos Tamper Protection Disabled on: " + $Device.hostname
+					# 		description = "Sophos tamper protection has been turned off on ${$Device.hostname} for at least 1 week. Please fix this issue."
+					# 	}
+				
+					# 	$NewTicket = New-AutotaskAPIResource -Resource Tickets -Body $NewTicketBody
+					# 	log_change -Company_Acronym $Company_Acronym -ServiceTarget "sophos" -RMM_Device_ID $false -SC_Device_ID $false -Sophos_Device_ID $Device.id -ChangeType "sophos_tamper_email" -Hostname $Device.hostname -Reason "Sophos Tamper Protection is Disabled, Email Sent"
+					# }
+				}
 			}
 		}
 

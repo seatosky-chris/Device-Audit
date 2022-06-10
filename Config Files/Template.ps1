@@ -177,6 +177,19 @@ $DontAutoDelete =  @{
 	Sophos = @()
 }
 
+# $Allow_Tamper_Protection_Disabled
+#
+# Allows Sophos tamper protection to be and stay disabled on these devices.
+# Enter the devices name or sophos ID in the below array.
+# To allow it for all devices, and a "*" as the single entry in the array.
+#
+# Example: $Allow_Tamper_Protection_Disabled = @(
+#	"STS-1234"
+# );
+$Allow_Tamper_Protection_Disabled = @(
+	
+);
+
 
 ##################################################################################################################
 ############################################  GLOBAL CONFIG OVERWRITES  ##########################################
