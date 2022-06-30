@@ -280,6 +280,7 @@ function Convert-UTCtoLocal {
 }
 
 $DeviceCount_Overview = @()
+$DeviceAuditSpreadsheetsUpdated = $false
 
 ### This code is unique for each company, lets loop through each company and run this code on each
 foreach ($ConfigFile in $CompaniesToAudit) {
@@ -4552,7 +4553,8 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					Copy-Item -Path $Path -Destination $MoveCustomerList.Location -Force
 				} else {
 					Move-Item -Path $Path -Destination $MoveCustomerList.Location -Force
-				}	
+				}
+				$DeviceAuditSpreadsheetsUpdated = $true
 			}
 			if ($MoveTechList.Location -and (Test-Path -Path $MoveTechList.Location)) {
 				$FileName = "$($Company_Acronym)--Device_List--$($MonthName)_$Year--ForTechs.xlsx"
@@ -4561,7 +4563,8 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					Copy-Item -Path $Path -Destination $MoveTechList.Location -Force
 				} else {
 					Move-Item -Path $Path -Destination $MoveTechList.Location -Force
-				}	
+				}
+				$DeviceAuditSpreadsheetsUpdated = $true
 			}
 			if ($MoveAssetReport.Location -and (Test-Path -Path $MoveAssetReport.Location)) {
 				$FileName = "$($Company_Acronym)--Asset_Report.xlsx"
@@ -4571,6 +4574,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				} else {
 					Move-Item -Path $Path -Destination $MoveAssetReport.Location -Force
 				}
+				$DeviceAuditSpreadsheetsUpdated = $true
 			}
 		} else {
 			Write-Host "Something went wrong! No devices were found for the billing list." -ForegroundColor Red
@@ -5363,6 +5367,12 @@ if ($companies -contains "ALL" -and ($DeviceCount_Overview | Measure-Object).Cou
 			Copy-Item -Path $Path -Destination $MoveOverview.Location -Force
 		} else {
 			Move-Item -Path $Path -Destination $MoveOverview.Location -Force
-		}	
+		}
+		$DeviceAuditSpreadsheetsUpdated = $true
 	}
+}
+
+# Update the last updated file
+if ($DeviceAuditSpreadsheetsUpdated) {
+	(Get-Date).ToString() | Out-File -FilePath ($MoveOverview.Location + "\lastUpdated.txt")
 }

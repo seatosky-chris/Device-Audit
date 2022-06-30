@@ -37,6 +37,8 @@ if (Test-Path "$PSScriptRoot\Config Files\AzureServiceAccount.json") {
 	Save-AzContext -Path "$PSScriptRoot\Config Files\AzureServiceAccount.json"
 }
 
+$DeviceAuditSpreadsheetsUpdated = $false
+
 # Get CPU data and Download new CPU data if older than 2 weeks
 if ($CPUDataLocation -and (Test-Path -Path ($CPUDataLocation + "\lastUpdated.txt"))) {
 	$CPUDataLastUpdated = Get-Content -Path ($CPUDataLocation + "\lastUpdated.txt") -Raw
@@ -3630,7 +3632,8 @@ if ($DOBillingExport) {
 				Copy-Item -Path $Path -Destination $MoveCustomerList.Location -Force
 			} else {
 				Move-Item -Path $Path -Destination $MoveCustomerList.Location -Force
-			}	
+			}
+			$DeviceAuditSpreadsheetsUpdated = $true	
 		}
 
 		# Create a second excel document (for techs with extra info)
@@ -3686,11 +3689,13 @@ if ($DOBillingExport) {
 			$FileName = "$($Company_Acronym)--Device_List--$($MonthName)_$Year--ForTechs.xlsx"
 			$Path = $PSScriptRoot + "\$FileName"
 			Copy-Item -Path $Path -Destination $MoveTechList.Location -Force
+			$DeviceAuditSpreadsheetsUpdated = $true
 		}
 		if ($MoveAssetReport.Location -and (Test-Path -Path $MoveAssetReport.Location)) {
 			$FileName = "$($Company_Acronym)--Asset_Report.xlsx"
 			$Path = $PSScriptRoot + "\$FileName"
 			Copy-Item -Path $Path -Destination $MoveAssetReport.Location -Force
+			$DeviceAuditSpreadsheetsUpdated = $true
 		}
 
 		Write-Host "Device list exported. See: $($FileName)" -ForegroundColor Green
@@ -4404,6 +4409,11 @@ if ($DOUpdateDeviceLocations -and $ITGConnected -and $AutotaskConnected -and $IT
 
 	Write-Host "Device locations updated."
 	Write-Host "======================"
+}
+
+# Update the last updated file
+if ($DeviceAuditSpreadsheetsUpdated) {
+	(Get-Date).ToString() | Out-File -FilePath ($MoveCustomerList.Location + "\lastUpdated.txt")
 }
 
 Read-Host "Press ENTER to close..." 
