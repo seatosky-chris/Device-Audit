@@ -20,7 +20,7 @@ $logFile = Join-Path -path "$PSScriptRoot\ErrorLogs" -ChildPath "log-$(Get-date 
 Set-PSFLoggingProvider -Name logfile -FilePath $logFile -Enabled $true;
 
 Write-PSFMessage -Level Verbose -Message "Starting audit on: $($companies | ConvertTo-Json)"
-$CompaniesToAudit = @()
+$CompaniesToAudit = [System.Collections.Generic.List[string]]::new();
 if ($companies -contains "ALL") {
 	$CompaniesToAudit = (Get-ChildItem "$PSScriptRoot\Config Files\" | Where-Object { $_.PSIsContainer -eq $false -and $_.Extension -eq '.ps1' -and $_.Name -like "Config-*" }).Name
 } else {
@@ -36,7 +36,7 @@ if ($companies -contains "ALL") {
 		}
 
 		if (Test-Path -Path "$PSScriptRoot\Config Files\$ConfigFile") {
-			$CompaniesToAudit += $ConfigFile
+			$CompaniesToAudit.Add($ConfigFile)
 		}
 	}
 }
@@ -100,6 +100,12 @@ if ($CPUDataLocation -and (Test-Path -Path ($CPUDataLocation + "\cpus.json"))) {
 	$CPUDetails = @()
 }
 
+if ($CPUDataLocation -and (Test-Path -Path ($CPUDataLocation + "\cpu_matching.json"))) {
+	$CPUMatching = Get-Content -Path ($CPUDataLocation + "\cpu_matching.json") -Raw | ConvertFrom-Json
+} else {
+	$CPUMatching = @()
+}
+
 if ($CPUDataLastUpdated -and $CPUDataLastUpdated.AddDays(14) -lt (Get-Date)) {
 	$NewCPUList = [System.Collections.ArrayList]@()
 	$headers=@{}
@@ -132,6 +138,11 @@ if ($CPUDataLastUpdated -and $CPUDataLastUpdated.AddDays(14) -lt (Get-Date)) {
 
 	$CPUDetails = $CPUDetails | Sort-Object -Unique -Property ID
 	$CPUDetails | ConvertTo-Json | Out-File -FilePath ($CPUDataLocation + "\cpus.json")
+}
+
+$CPUDetailsHash = @{}
+foreach ($CPU in $CPUDetails) { 
+	$CPUDetailsHash[$CPU.ID] = $CPU
 }
 
 # Connect to IT Glue
@@ -328,12 +339,15 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 		$NextKey = $false
 		if ($SophosEndpoints.pages.nextKey) {
+			$SophosEndpoints.items = [System.Collections.Generic.List[PSCustomObject]]$SophosEndpoints.items
 			$NextKey = $SophosEndpoints.pages.nextKey
 		}
 		while ($NextKey) {
 			$SophosEndpoints_NextPage = $false
 			$SophosEndpoints_NextPage = Invoke-RestMethod -Method GET -Headers $SophosHeader -uri ($TenantApiHost + "/endpoint/v1/endpoints?pageFromKey=$NextKey")
-			$SophosEndpoints.items += $SophosEndpoints_NextPage.items
+			foreach ($Endpoint in $SophosEndpoints_NextPage.items) {
+				$SophosEndpoints.items.Add($Endpoint)
+			}
 
 			$NextKey = $false
 			if ($SophosEndpoints_NextPage.pages.nextKey) {
@@ -422,6 +436,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			$ITG_Devices = $ITG_Devices.data
 		}
 	}
+	$ITG_DevicesHash = @{}
+	foreach ($Device in $ITG_Devices) { 
+		$ITG_DevicesHash[$Device.id] = $Device
+	}
 
 	# Get all devices from Autotask + locations & contacts for spreadsheet exports
 	$Autotask_Devices = @()
@@ -432,6 +450,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		$Autotask_Locations = $Autotask_Locations | Where-Object { $_.isActive -eq "True" }
 		$Autotask_Contacts = Get-AutotaskAPIResource -Resource Contacts -SimpleSearch "companyID eq $Autotask_ID"
 		$Autotask_Contacts = $Autotask_Contacts | Where-Object { $_.isActive -eq 1 }
+	}
+	$Autotask_DevicesHash = @{}
+	foreach ($Device in $Autotask_Devices) { 
+		$Autotask_DevicesHash[$Device.id] = $Device
 	}
 
 	Write-Output "Imported all devices."
@@ -461,6 +483,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		$MostRecentDate = @($_.GuestLastActivityTime, $_.GuestInfoUpdateTime, $_.GuestLastBootTime) | Sort-Object | Select-Object -Last 1
 		$_.GuestLastSeen = $MostRecentDate
 	}
+	$SC_DevicesHash = @{}
+	foreach ($Device in $SC_Devices) { 
+		$SC_DevicesHash[$Device.SessionID] = $Device
+	}
 
 	$RMM_Devices = $RMM_Devices |
 						Select-Object @{Name="Device UID"; E={$_.uid}}, @{Name="Device Hostname"; E={$_.hostname}}, @{Name="Serial Number"; E={$_.serialNumber}}, MacAddresses, 
@@ -478,10 +504,18 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 												}
 											}
 										}}, @{Name="ToDelete"; E={ if ($_.udf.udf30 -eq "True") { $true } else { $false } }}, suspended
+	$RMM_DevicesHash = @{}
+	foreach ($Device in $RMM_Devices) { 
+		$RMM_DevicesHash[$Device."Device UID"] = $Device
+	}
 	
 	$Sophos_Devices = $Sophos_Devices | Select-Object id, @{Name="hostname"; E={$_.hostname -replace '[^\x00-\x7F]+', ''}}, macAddresses, 
 											@{Name="type"; E={if ($_.type -eq "computer") { "Workstation"} else { "Server" }}}, 
 											lastSeenAt, @{Name="LastUser"; E={($_.associatedPerson.viaLogin -split '\\')[1]}}, @{Name="OS"; E={if ($_.os.name) { $_.os.name } else { "$($_.os.platform) $($_.os.majorVersion).$($_.os.minorVersion)" }}}
+	$Sophos_DevicesHash = @{}
+	foreach ($Device in $Sophos_Devices) { 
+		$Sophos_DevicesHash[$Device.id] = $Device
+	}
 
 	# The id on each Sophos device is not the same ID that is used on the website
 	# To get this ID, we must invert each pair of characters in the ID
@@ -568,7 +602,28 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 	# Match devices between the device lists
 	Write-Host "Matching devices..."
+	$PerformMatching = $true
 	$MatchedDevices = @()
+
+	# If we already matched devices today, use the exported json matching file
+	if ($MatchedDevicesLocation) {
+		if (!(Test-Path -Path $MatchedDevicesLocation)) {
+			New-Item -ItemType Directory -Force -Path $MatchedDevicesLocation | Out-Null
+		}
+		$Day = Get-Date -Format "dd"
+		$Month = Get-Date -Format "MM"
+		$Year = Get-Date -Format "yyyy"
+
+		$MatchedDevicesJsonPath = "$($MatchedDevicesLocation)\$($Company_Acronym)_matched_devices_$($Year)_$($Month)_$($Day).json"
+		if ($MatchedDevicesJsonPath -and (Test-Path -Path $MatchedDevicesJsonPath)) {
+			$MatchedDevices = Get-Content -Path $MatchedDevicesJsonPath -Raw | ConvertFrom-Json
+			if ($MatchedDevices -and ($MatchedDevices | Measure-Object).Count -gt 0) {
+				$PerformMatching = $false
+			} else {
+				$MatchedDevices = @()
+			}
+		}
+	}
 
 	# Match ScreenConnect devices with themselves to find any duplicates
 	foreach ($Device in $SC_Devices) {
@@ -585,7 +640,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		if ($ForcedMatches) {
 			# Match IDs
 			foreach ($Match in ($ForcedMatches | Where-Object { $_.id -ne $false })) {
-				$Related_SCDevices += @($SC_Devices | Where-Object { $_.SessionID -like $Match.id })
+				$Related_SCDevices += $SC_DevicesHash[$Match.id]
 			}
 			# If $ForcedMatches contains the id = $false, stop checking for duplicates
 			if ((($ForcedMatches | Where-Object { $_.id -eq $false }) | Measure-Object).Count -gt 0) {
@@ -655,7 +710,14 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 	# Match ScreenConnect devices to RMM
 	foreach ($MatchedDevice in $MatchedDevices) {
-		$Matched_SC_Devices = $SC_Devices | Where-Object { $_.SessionID -in $MatchedDevice.sc_matches }
+		if (!$PerformMatching -and ($MatchedDevice.rmm_matches | Measure-Object).Count -gt 0) {
+			continue
+		}
+
+		$Matched_SC_Devices = @()
+		foreach ($DeviceID in $MatchedDevice.sc_matches) {
+			$Matched_SC_Devices += $SC_DevicesHash[$DeviceID]
+		}
 
 		foreach ($Device in $Matched_SC_Devices) {
 			$Related_RMMDevices = @()
@@ -670,7 +732,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				if ($ForcedMatches) {
 					# Match IDs
 					foreach ($Match in $ForcedMatches) {
-						$Related_RMMDevices += @($RMM_Devices | Where-Object { $_."Device UID" -like $Match.id })
+						$Related_RMMDevices += $RMM_DevicesHash[$Match.id]
 					}
 				}
 				# If $IgnoreRMM contains $False, stop here as that means we dont want to match with any more rmm devices
@@ -784,6 +846,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 	# Match Sophos devices
 	foreach ($Device in $Sophos_Devices) {
+		if (!$PerformMatching -and $Device.id -in $MatchedDevices.sophos_matches) {
+			continue
+		}
+
 		$CleanDeviceName = $Device.hostname -replace '\W', ''
 		$RelatedDevices = @()
 		$AddedForcedMatches = @()
@@ -959,6 +1025,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	# Match devices to ITG
 	if ($ITGConnected) {
 		foreach ($Device in $ITG_Devices) {
+			if (!$PerformMatching -and $Device.id -in $MatchedDevices.itg_matches) {
+				continue
+			}
+
 			$RelatedDevices = @()
 
 			# ITG to RMM Matches
@@ -1055,6 +1125,9 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	# Match devices to Autotask
 	if ($AutotaskConnected) {
 		foreach ($Device in $Autotask_Devices) {
+			if (!$PerformMatching -and $Device.id -in $MatchedDevices.autotask_matches) {
+				continue
+			}
 			$RelatedDevices = @()
 
 			# Autotask to RMM Matches
@@ -1150,6 +1223,15 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				}
 			}
 		}
+	}
+
+	# Export matched devices json to file
+	if ($MatchedDevicesLocation) {
+		$MatchedDevices | ConvertTo-Json | Out-File -FilePath $MatchedDevicesJsonPath
+		Write-Host "Exported the matched devices json file."
+
+		# Delete any old matched devices json files
+		Get-ChildItem $MatchedDevicesLocation | Where-Object { $_.Name -Match "$($Company_Acronym)_matched_devices_\d{4}_\d{2}_\d{2}\.json" -and $_.FullName -ne $MatchedDevicesJsonPath -and !$_.PSIsContainer } | Remove-Item
 	}
 
 	Write-Host "Matching Complete!"
@@ -1274,7 +1356,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			$EmailLink = "https://$($DattoAPIKey.Region).centrastage.net/csm/search?qs=uid%3A$($RMM_Device_ID)"
 		} elseif ($ServiceTarget -eq 'sc') {
 			$ID_Params."SC_Device_ID" = $SC_Device_ID
-			$SCDevice = $SC_Devices | Where-Object { $_.SessionID -eq $SC_Device_ID }
+			$SCDevice = $SC_DevicesHash[$SC_Device_ID]
 			$EmailLink = "$($SCLogin.URL)/Host#Access/All%20Machines/$($SCDevice.Name)/$SC_Device_ID"
 		} elseif ($ServiceTarget -eq 'sophos') {
 			$ID_Params."Sophos_Device_ID" = $Sophos_Device_ID
@@ -1340,9 +1422,12 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	# Functions for comparing devices by their last active date
 	# Pass the function a list of device ids
 	# Each returns an ordered list with the type (rmm, sc, or sophos), device ID and last active date, ordered with newest first, $null if no date
+	$UnixDateLowLimit = Get-Date -Year 1970 -Month 1 -Day 1 -Hour 0 -Minute 0 -Second 0
 	function compare_activity_sc($DeviceIDs) {
-		$UnixDateLowLimit = Get-Date -Year 1970 -Month 1 -Day 1
-		$SCDevices = $SC_Devices | Where-Object { $_.SessionID -in $DeviceIDs }
+		$SCDevices = @()
+		foreach ($DeviceID in $DeviceIDs) {
+			$SCDevices += $SC_DevicesHash[$DeviceID]
+		}
 		$DevicesOutput = @()
 
 		foreach ($Device in $SCDevices) {
@@ -1375,7 +1460,11 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 	function compare_activity_rmm($DeviceIDs) {
 		$Now = Get-Date
-		$RMMDevices = $RMM_Devices | Where-Object { $_."Device UID" -in $DeviceIDs }
+		$RMMDevices = @()
+		foreach ($DeviceID in $DeviceIDs) {
+			$RMMDevices += $RMM_DevicesHash[$DeviceID]
+		}
+
 		$DevicesOutput = @()
 
 		foreach ($Device in $RMMDevices) {
@@ -1401,7 +1490,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	}
 
 	function compare_activity_sophos($DeviceIDs) {
-		$SophosDevices = $Sophos_Devices | Where-Object { $_.id -in $DeviceIDs }
+		$SophosDevices = @()
+		foreach ($DeviceID in $DeviceIDs) {
+			$SophosDevices += $Sophos_DevicesHash[$DeviceID]
+		}
 		$DevicesOutput = @()
 
 		foreach ($Device in $SophosDevices) {
@@ -1427,17 +1519,17 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	function compare_activity($MatchedDevice) {
 		$Activity = @{}
 
-		if ($MatchedDevice.sc_matches -and ($MatchedDevice.sc_matches | Measure-Object).count -gt 0) {
+		if ($MatchedDevice.sc_matches -and $MatchedDevice.sc_matches.count -gt 0) {
 			$SCActivity = compare_activity_sc $MatchedDevice.sc_matches
 			$Activity.sc = $SCActivity
 		}
 
-		if ($MatchedDevice.rmm_matches -and ($MatchedDevice.rmm_matches | Measure-Object).count -gt 0) {
+		if ($MatchedDevice.rmm_matches -and $MatchedDevice.rmm_matches.count -gt 0) {
 			$RMMActivity = compare_activity_rmm $MatchedDevice.rmm_matches
 			$Activity.rmm = $RMMActivity
 		}
 
-		if ($MatchedDevice.sophos_matches -and ($MatchedDevice.sophos_matches | Measure-Object).count -gt 0) {
+		if ($MatchedDevice.sophos_matches -and $MatchedDevice.sophos_matches.count -gt 0) {
 			$SophosActivity = compare_activity_sophos $MatchedDevice.sophos_matches
 			$Activity.sophos = $SophosActivity
 		}
@@ -1634,7 +1726,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					$OrderedDevices = compare_activity_sc($Device.sc_matches)
 					$i = 0
 					foreach ($OrderedDevice in $OrderedDevices) {
-						$SCDevice = $SC_Devices | Where-Object { $_.SessionID -eq $OrderedDevice.id }
+						$SCDevice = $SC_DevicesHash[$OrderedDevice.id]
 						$Deleted = $false
 						$AllowDeletion = $true
 						if ($DontAutoDelete -and ($DontAutoDelete.Hostnames -contains $SCDevice.Name -or $DontAutoDelete.SC -contains $SCDevice.Name -or $DontAutoDelete.SC -contains $OrderedDevice.id)) {
@@ -1664,7 +1756,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					$OrderedDevices = compare_activity_rmm($Device.rmm_matches)
 					$i = 0
 					foreach ($OrderedDevice in $OrderedDevices) {
-						$RMMDevice = $RMM_Devices | Where-Object { $_."Device UID" -eq $OrderedDevice.id }
+						$RMMDevice = $RMM_DevicesHash[$OrderedDevice.id]
 						$Deleted = $false
 						$AllowDeletion = $true
 						if ($DontAutoDelete -and ($DontAutoDelete.Hostnames -contains $RMMDevice."Device Hostname" -or $DontAutoDelete.RMM -contains $RMMDevice."Device Hostname" -or $DontAutoDelete.RMM -contains $OrderedDevice.id)) {
@@ -1695,7 +1787,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					$OrderedDevices = compare_activity_sophos($Device.sophos_matches)
 					$i = 0
 					foreach ($OrderedDevice in $OrderedDevices) {
-						$SophosDevice = $Sophos_Devices | Where-Object { $_.id -eq $OrderedDevice.id }
+						$SophosDevice = $Sophos_DevicesHash[$OrderedDevice.id]
 						$DuplicatesTable += [PsCustomObject]@{
 							type = "Sophos"
 							hostname = $SophosDevice.hostname
@@ -1720,25 +1812,37 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 				if ($Device.type -eq "SC") {
 					$MatchedDevice = $MatchedDevices | Where-Object { $Device.id -in $_.sc_matches }
+					$SCDevices = @()
+					foreach ($DeviceID in $MatchedDevice.sc_matches) {
+						$SCDevices += $SC_DevicesHash[$DeviceID]
+					}
 					foreach ($MDevice in $MatchedDevice) {
 						$MDevice.sc_matches = $MatchedDevice.sc_matches | Where-Object { $_ -ne $Device.id }
-						$MDevice.sc_hostname = @(($SC_Devices | Where-Object { $_.SessionID -in $MatchedDevice.sc_matches }).Name)
+						$MDevice.sc_hostname = @($SCDevices.Name)
 					}
 				}
 
 				if ($Device.type -eq "RMM") {
 					$MatchedDevice = $MatchedDevices | Where-Object { $Device.id -in $_.rmm_matches }
+					$RMMDevices = @()
+					foreach ($DeviceID in $MatchedDevice.rmm_matches) {
+						$RMMDevices += $RMM_DevicesHash[$DeviceID]
+					}
 					foreach ($MDevice in $MatchedDevice) {
 						$MDevice.rmm_matches = $MatchedDevice.rmm_matches | Where-Object { $_ -ne $Device.id }
-						$MDevice.rmm_hostname = @(($RMM_Devices | Where-Object { $_."Device UID" -in $MatchedDevice.rmm_matches })."Device Hostname")
+						$MDevice.rmm_hostname = @($RMMDevices."Device Hostname")
 					}
 				}
 
 				if ($Device.type -eq "Sophos") {
 					$MatchedDevice = $MatchedDevices | Where-Object { $Device.id -in $_.sophos_matches }
+					$SophosDevices = @()
+					foreach ($DeviceID in $MatchedDevice.sophos_matches) {
+						$SophosDevices += $Sophos_DevicesHash[$DeviceID]
+					}
 					foreach ($MDevice in $MatchedDevice) {
 						$MDevice.sophos_matches = $MatchedDevice.sophos_matches | Where-Object { $_ -ne $Device.id }
-						$MDevice.sophos_hostname = @(($Sophos_Devices | Where-Object { $_.id -in $MatchedDevice.sophos_matches }).hostname)
+						$MDevice.sophos_hostname = @($SophosDevices.hostname)
 					}
 				}
 			}
@@ -1753,7 +1857,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		Write-Host "Searching for any devices that look like they belong in a different company..."
 		$MoveDevices = @()
 
-		foreach ($Device in $MatchedDevices) {
+		:matchedDeviceLoop foreach ($Device in $MatchedDevices) {
 			$Hostnames = @()
 			$SCDeviceIDs = @($Device.sc_matches)
 			$RMMDeviceIDs = @($Device.rmm_matches)
@@ -1762,14 +1866,26 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			$DeviceType = $false
 			$OperatingSystem = $false
 
+			foreach ($Acronym in $Device_Acronyms) {
+				if ($Device.sc_hostname -like "$($Acronym)-*" -or $Device.rmm_hostname -like "$($Acronym)-*" -or $Device.sophos_hostname -like "$($Acronym)-*") {
+					continue matchedDeviceLoop
+				}
+			}
+
 			if ($SCDeviceIDs) {
-				$SCDevices = $SC_Devices | Where-Object { $_.SessionID -in $SCDeviceIDs }
+				$SCDevices = @()
+				foreach ($DeviceID in $SCDeviceIDs) {
+					$SCDevices += $SC_DevicesHash[$DeviceID]
+				}			
 				$Hostnames += $SCDevices.Name
 				$OperatingSystem = $SCDevices[0].GuestOperatingSystemName
 				$DeviceType = $SCDevices[0].DeviceType
 			}
 			if ($RMMDeviceIDs) {
-				$RMMDevices = $RMM_Devices | Where-Object { $_."Device UID" -in $RMMDeviceIDs }
+				$RMMDevices = @()
+				foreach ($DeviceID in $RMMDeviceIDs) {
+					$RMMDevices += $RMM_DevicesHash[$DeviceID]
+				}
 				$Hostnames += $RMMDevices."Device Hostname"
 				if (!$OperatingSystem) {
 					$OperatingSystem = $RMMDevices[0]."Operating System"
@@ -1779,7 +1895,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				}
 			}
 			if ($SophosDeviceIDs) {
-				$SophosDevices = $Sophos_Devices | Where-Object { $_.id -in $SophosDeviceIDs }
+				$SophosDevices = @()
+				foreach ($DeviceID in $SophosDeviceIDs) {
+					$SophosDevices += $Sophos_DevicesHash[$DeviceID]
+				}
 				$Hostnames += $SophosDevices.hostname
 				if (!$OperatingSystem) {
 					$OperatingSystem = $SophosDevices[0].OS
@@ -1964,13 +2083,28 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		return $false
 	}
 
+	# Get activity comparisons and store for later (so we aren't repeating this over and over)
+	if ($DOBrokenConnectionSearch -or $DOMissingConnectionSearch -or $DOInactiveSearch -or $DOUsageDBSave -or $DOBillingExport) {
+		foreach ($Device in $MatchedDevices) {
+			$ActivityComparison = compare_activity($Device)
+			$ActivityComparison.Values = @($ActivityComparison.Values)
+			$Device | Add-Member -NotePropertyName activity_comparison -NotePropertyValue $null
+			$Device.activity_comparison = $ActivityComparison
+		}
+	}
+
+	$MatchedDevicesHash = @{}
+	foreach ($Device in $MatchedDevices) { 
+		$MatchedDevicesHash[$Device.id] = $Device
+	}
+
 	# Find broken device connections (e.g. online recently in ScreenConnect but no in RMM)
 	if ($DOBrokenConnectionSearch) {
 		Write-Host "Searching for broken connections..."
 		$BrokenConnections = @()
 		$SendEmail = $false
 		foreach ($Device in $MatchedDevices) {
-			$ActivityComparison = compare_activity($Device)
+			$ActivityComparison = $Device.activity_comparison
 			$Activity = $ActivityComparison.Values | Sort-Object last_active
 
 			if (($Activity | Measure-Object).count -gt 1) {
@@ -1985,11 +2119,11 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						$DeviceType = $Activity[$i].type
 						$DeviceID = $Activity[$i].id
 						if ($DeviceType -eq 'sc') {
-							$Hostname = ($SC_Devices | Where-Object { $_.SessionID -eq $DeviceID }).Name
+							$Hostname = ($SC_DevicesHash[$DeviceID]).Name
 						} elseif ($DeviceType -eq 'rmm') {
-							$Hostname = ($RMM_Devices | Where-Object { $_."Device UID" -eq $DeviceID })."Device Hostname"
+							$Hostname = ($RMM_DevicesHash[$DeviceID])."Device Hostname"
 						} elseif ($DeviceType -eq 'sophos') {
-							$SophosDevice = ($Sophos_Devices | Where-Object { $_.id -eq $DeviceID })
+							$SophosDevice = $Sophos_DevicesHash[$DeviceID]
 							$Hostname = $SophosDevice.hostname
 						}
 
@@ -2006,7 +2140,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						$AutoFix = $false
 						if (!$ReadOnly -and $DeviceType -eq 'rmm' -and $RMM_ID -and ($Device.sc_matches | Measure-Object).Count -gt 0 -and $SCLogin.Username -and $SCWebSession -and $Device.id -notin $MoveDevices.ID) {
 							# Device broken in rmm but is in SC and we are using the SC api account, have the rmm org id, and this device is not in the $MoveDevices array (devices that look like they dont belong)
-							$SC_Device = $SC_Devices | Where-Object { $_.SessionID -in $Device.sc_matches }
+							$SC_Device = @()
+							foreach ($DeviceID in $Device.sc_matches) {
+								$SC_Device += $SC_DevicesHash[$DeviceID]
+							}
 							
 							# Only continue of the device was seen recently in SC (this will only work if it is active) and is using Windows
 							foreach ($SCDevice in $SC_Device) {
@@ -2040,7 +2177,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 						if (!$ReadOnly -and $DeviceType -eq 'sc' -and $RMM_ID -and ($Device.rmm_matches | Measure-Object).Count -gt 0 -and $Device.id -notin $MoveDevices.ID) {
 							# Device broken in sc but is in RMM and we are using the rmm api, and this device is not in the $MoveDevices array (devices that look like they dont belong)
-							$RMM_Device = $RMM_Devices | Where-Object { $_."Device UID" -in $Device.rmm_matches }
+							$RMM_Device = @()
+							foreach ($DeviceID in $Device.rmm_matches) {
+								$RMM_Device += $RMM_DevicesHash[$DeviceID]
+							}
 	
 							# Only continue of the device was seen in RMM in the last 24 hours
 							foreach ($RMMDevice in $RMM_Device) {
@@ -2151,7 +2291,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			$RMMDeviceIDs = @($Device.rmm_matches)
 			$SophosDeviceIDs = @($Device.sophos_matches)
 
-			$ActivityComparison = compare_activity($Device)
+			$ActivityComparison = $Device.activity_comparison
 			$Activity = $ActivityComparison.Values | Sort-Object last_active
 			$NewestDate = [DateTime]($Activity.last_active | Sort-Object | Select-Object -Last 1)
 			$Timespan = New-TimeSpan -Start $NewestDate -End $Now
@@ -2185,19 +2325,28 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					$DeviceType = $false
 					
 					if ($SCDeviceIDs) {
-						$SCDevices = $SC_Devices | Where-Object { $_.SessionID -in $SCDeviceIDs }
+						$SCDevices = @()
+						foreach ($DeviceID in $SCDeviceIDs) {
+							$SCDevices += $SC_DevicesHash[$DeviceID]
+						}
 						$Hostnames += $SCDevices.Name
 						$DeviceType = $SCDevices[0].DeviceType
 					}
 					if ($RMMDeviceIDs) {
-						$RMMDevices = $RMM_Devices | Where-Object { $_."Device UID" -in $RMMDeviceIDs }
+						$RMMDevices = @()
+						foreach ($DeviceID in $RMMDeviceIDs) {
+							$RMMDevices += $RMM_DevicesHash[$DeviceID]
+						}
 						$Hostnames += $RMMDevices."Device Hostname"
 						if ($DeviceType) {
 							$DeviceType = $RMMDevices[0]."Device Type"
 						}
 					}
 					if ($SophosDeviceIDs) {
-						$SophosDevices = $Sophos_Devices | Where-Object { $_.id -in $SophosDeviceIDs }
+						$SophosDevices = @()
+						foreach ($DeviceID in $SophosDeviceIDs) {
+							$SophosDevices += $Sophos_DevicesHash[$DeviceID]
+						}						
 						$Hostnames += $SophosDevices.hostname
 						if (!$DeviceType) {
 							$DeviceType = $SophosDevices[0].type
@@ -2368,7 +2517,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		$InactiveDevices = @()
 		$Now = Get-Date
 		foreach ($Device in $MatchedDevices) {
-			$ActivityComparison = compare_activity($Device)
+			$ActivityComparison = $Device.activity_comparison
 			$Activity = $ActivityComparison.Values | Sort-Object last_active
 
 			if (($Activity | Measure-Object).count -gt 0) {
@@ -2394,14 +2543,14 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					$WarrantyExpiry = ''
 
 					if ($SCDeviceID) {
-						$SCDevice = $SC_Devices | Where-Object { $_.SessionID -eq $SCDeviceID }
+						$SCDevice = $SC_DevicesHash[$SCDeviceID]
 						$Hostnames += $SCDevice.Name
 						$User = $SCDevice.GuestLoggedOnUserName
 						$OperatingSystem = $SCDevice.GuestOperatingSystemName
 						$Model = $SCDevice.GuestMachineModel
 					}
 					if ($RMMDeviceID) {
-						$RMMDevice = $RMM_Devices | Where-Object { $_."Device UID" -eq $RMMDeviceID }
+						$RMMDevice = $RMM_DevicesHash[$RMMDeviceID]
 						$Hostnames += $RMMDevice."Device Hostname"
 						if (!$User) {
 							$User = ($RMMDevice."Last User" -split '\\')[1]
@@ -2415,7 +2564,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						$WarrantyExpiry = $RMMDevice."Warranty Expiry"
 					}
 					if ($SophosDeviceID) {
-						$SophosDevice = $Sophos_Devices | Where-Object { $_.id -eq $SophosDeviceID }
+						$SophosDevice = $Sophos_DevicesHash[$SophosDeviceID]
 						$Hostnames += $SophosDevice.hostname
 						if (!$User) {
 							$User = $SophosDevice.LastUser
@@ -2495,7 +2644,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 								$Deleted = archive_itg -ITG_Device_ID $ID
 								if ($Deleted) {
 									$DeleteITG = "Yes"
-									$ITG_Device = $ITG_Devices | Where-Object { $_.id -eq  $ID }
+									$ITG_Device = $ITG_DevicesHash[$ID]
 									log_change -Company_Acronym $Company_Acronym -ServiceTarget "itg" -RMM_Device_ID $Device.rmm_matches -SC_Device_ID $Device.sc_matches -Sophos_Device_ID $Device.sophos_matches -ChangeType "delete" -Hostname $ITG_Device.attributes.name -Reason "Inactive"
 								}
 							}
@@ -2622,8 +2771,8 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		$ExistingUsageToday = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Usage" -Query $Query -PartitionKey $Year_Month
 	
 		foreach ($Device in $MatchedDevices) {
-			$ActivityComparison = compare_activity($Device)
-			$Activity = @($ActivityComparison.Values) | Sort-Object last_active
+			$ActivityComparison = $Device.activity_comparison
+			$Activity = $ActivityComparison.Values | Sort-Object last_active
 	
 			if (($Activity | Measure-Object).count -gt 0) {
 				$NewestDate = [DateTime]($Activity.last_active | Sort-Object | Select-Object -Last 1)
@@ -2636,7 +2785,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				}
 	
 				$LastActive = $NewestDate;
-				$SCDevices = $SC_Devices | Where-Object { $_.SessionID -in $Device.sc_matches }
+				$SCDevices = @()
+				foreach ($DeviceID in $Device.sc_matches) {
+					$SCDevices += $SC_DevicesHash[$DeviceID]
+				}
 	
 				# If this device exists in SC, lets make sure it was also recently logged into (not just on)
 				$SCLastActive = ($SCDevices | Sort-Object -Property GuestLastActivityTime | Select-Object -Last 1).GuestLastActivityTime
@@ -2648,7 +2800,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					$LastActive = $SCLastActive
 				}
 	
-				$RMMDevices = $RMM_Devices | Where-Object { $_."Device UID" -in $Device.rmm_matches }
+				$RMMDevices = @()
+				foreach ($DeviceID in $Device.rmm_matches) {
+					$RMMDevices += $RMM_DevicesHash[$DeviceID]
+				}
 	
 				if (!$SCDevices -and !$RMMDevices) {
 					# Lets ignore anything that's only in sophos, we can't match those securely enough for this
@@ -3478,11 +3633,14 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				$AutotaskContacts = $AutotaskContacts | Where-Object { $_.isActive }
 
 				foreach ($Device in $DeviceUsers) {
-					$ITG_Device = $ITG_Devices | Where-Object { $_.id -eq $Device.ITG_Computer }
+					$ITG_Device = $ITG_DevicesHash[$Device.ITG_Computer]
 					$MatchedDevice = $MatchedDevices | Where-Object { $_.itg_matches -contains $Device.ITG_Computer }
 					$Autotask_Device = $false
 					if ($MatchedDevice.autotask_matches) {
-						$Autotask_Device = $Autotask_Devices | Where-Object { $_.id -in $MatchedDevice.autotask_matches }
+						$Autotask_Device = @()
+						foreach ($DeviceID in $MatchedDevice.autotask_matches) {
+							$Autotask_Device += $Autotask_DevicesHash[$DeviceID]
+						}
 					}
 					$Existing_RelatedItems = $false
 					$Existing_DeviceUsersLogged = $ExistingDeviceUsers | Where-Object { $_.ITG_Computer -eq $Device.ITG_Computer }
@@ -3735,7 +3893,9 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 			$SophosDeviceCount = ($Sophos_Devices | Measure-Object).Count
 			$i = 0
-			foreach ($Device in $Sophos_Devices) {
+			$SophosFailedSleepTime = 0
+			$MaxFailTime = 180000 # 3 minutes
+			:foreachSophosDevice foreach ($Device in $Sophos_Devices) {
 				$i++
 				[int]$PercentComplete = ($i / $SophosDeviceCount * 100)
 				Write-Progress -Activity "Retrieving Sophos Tamper Protection Keys" -PercentComplete $PercentComplete -Status ("Working - " + $PercentComplete + "%")
@@ -3752,7 +3912,31 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					Authorization = "Bearer $SophosJWT"
 					"X-Tenant-ID" = $SophosTenantID
 				}
-				$SophosTamperInfo = Invoke-RestMethod -Method GET -Headers $SophosHeader -uri ($TenantApiHost + "/endpoint/v1/endpoints/$($Device.id)/tamper-protection")
+
+				$SophosTamperInfo = $false
+				$attempt = 0
+				while (!$SophosTamperInfo -and $SophosFailedSleepTime -lt $MaxFailTime) {
+					try {
+						$SophosTamperInfo = Invoke-RestMethod -Method GET -Headers $SophosHeader -uri ($TenantApiHost + "/endpoint/v1/endpoints/$($Device.id)/tamper-protection")
+					} catch {
+						if ($_.Exception.Response.StatusCode.value__ -eq 429 -or $_.Exception.Response.StatusCode.value__ -match "5\d{2}") {
+							Write-Host "Retry Sophos API call."
+							Write-Host "StatusCode:" $_.Exception.Response.StatusCode.value__ 
+							Write-Host "StatusDescription:" $_.Exception.Response.StatusDescription
+							$SophosTamperInfo = $false
+
+							$backoff = Get-Random -Minimum 0 -Maximum (@(30000, (1000 * [Math]::Pow(2, $attempt)))| Measure-Object -Minimum).Minimum
+							$attempt++
+							$SophosFailedSleepTime += $backoff
+							Write-Host "Sleep for: $([int]$backoff)"
+							Start-Sleep -Milliseconds ([int]$backoff)
+						}
+					}
+				}
+
+				if ($SophosFailedSleepTime -ge $MaxFailTime) {
+					break foreachSophosDevice
+				}
 
 				if ($SophosTamperInfo -and $SophosTamperInfo.password) {
 					$SophosTamperKeys.Add([PsCustomObject]@{
@@ -3804,7 +3988,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				}
 			}
 
-			if ($SophosTamperKeys.Count -gt 0) {
+			if ($SophosTamperKeys.Count -gt 0 -and $SophosFailedSleepTime -lt $MaxFailTime) {
 				@{
 					keys = $SophosTamperKeys
 					lastUpdated = (Get-Date)
@@ -3826,8 +4010,8 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		$Now = Get-Date
 
 		foreach ($Device in $MatchedDevices) {
-			$ActivityComparison = compare_activity($Device)
-			$Activity = @($ActivityComparison.Values) | Sort-Object last_active
+			$ActivityComparison = $Device.activity_comparison
+			$Activity = $ActivityComparison.Values | Sort-Object last_active
 
 			if (($Activity | Measure-Object).count -gt 0) {
 				$NewestDate = [DateTime]($Activity.last_active | Sort-Object | Select-Object -Last 1)
@@ -3862,7 +4046,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				$SophosTamperStatus = $false
 
 				if ($RMMDeviceID) {
-					$RMMDevice = $RMM_Devices | Where-Object { $_."Device UID" -eq $RMMDeviceID }
+					$RMMDevice = $RMM_DevicesHash[$RMMDeviceID]
 					$Hostname = $RMMDevice."Device Hostname"
 					$SerialNumber = $RMMDevice."Serial Number"
 					$LastUser = ($RMMDevice."Last User" -split '\\')[1]
@@ -3880,7 +4064,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					}
 				}
 				if ($AutotaskDeviceID) {
-					$AutotaskDevice = $Autotask_Devices | Where-Object { $_.id -eq $AutotaskDeviceID }
+					$AutotaskDevice = $Autotask_DevicesHash[$AutotaskDeviceID]
 					if ($AutotaskDevice) {
 						$AutotaskLocation = $Autotask_Locations | Where-Object { $_.id -eq $AutotaskDevice.companyLocationID }
 						$AutotaskContact = $Autotask_Contacts | Where-Object { $_.id -eq $AutotaskDevice.contactID }
@@ -3916,7 +4100,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					}
 				}
 				if ($ITGDeviceID) {
-					$ITGDevice = $ITG_Devices | Where-Object { $_.id -eq $ITGDeviceID }
+					$ITGDevice = $ITG_DevicesHash[$ITGDeviceID]
 					if (!$Location) {
 						$Location = $ITGDevice.attributes."location-name"
 					}
@@ -3937,7 +4121,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					}
 				}
 				if ($SCDeviceID) {
-					$SCDevice = $SC_Devices | Where-Object { $_.SessionID -eq $SCDeviceID }
+					$SCDevice = $SC_DevicesHash[$SCDeviceID]
 					if (!$Hostname) {
 						$Hostname = $SCDevice.Name
 					}
@@ -3970,7 +4154,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					}
 				}
 				if ($SophosDeviceID) {
-					$SophosDevice = $Sophos_Devices | Where-Object { $_.id -eq $SophosDeviceID }
+					$SophosDevice = $Sophos_DevicesHash[$SophosDeviceID]
 					if (!$Hostname) {
 						$Hostname = $SophosDevice.hostname
 					}
@@ -3994,8 +4178,22 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				# get cpu performance score
 				if ($CPUs) {
 					foreach ($CPU in $CPUs) {
-						$CleanName = $CPU -replace [regex]::escape("(R)"), "" -replace [regex]::escape("(C)"), "" -replace [regex]::escape("(TM)"), "" -replace "CPU", "" -replace '\s+', ' '
-						$CPUMatch = $CPUDetails | Where-Object { $_.Name -like $CleanName }
+						$CPUMatch = $false
+						$JsonMatchSaved = $false
+						$CPUMatchTemp = $CPUMatching | Where-Object { $_.CPU -eq $CPU }
+						if ($CPUMatchTemp) {
+							if ($CPUDetailsHash[$CPUMatchTemp.ID]) {
+								$CPUMatch = $CPUDetailsHash[$CPUMatchTemp.ID]
+								$JsonMatchSaved = $true
+							} else {
+								$CPUMatching = $CPUMatching | Where-Object { $_.CPU -ne $CPU }
+							}
+						}
+
+						if (!$CPUMatch) {
+							$CleanName = $CPU -replace [regex]::escape("(R)"), "" -replace [regex]::escape("(C)"), "" -replace [regex]::escape("(TM)"), "" -replace "CPU", "" -replace '\s+', ' '
+							$CPUMatch = $CPUDetails | Where-Object { $_.Name -like $CleanName }
+						}
 						if (!$CPUMatch) {
 							$CPUMatch = $CPUDetails | Where-Object { ($_.Name -replace "-", " ") -like ($CleanName -replace "-", " ") }
 						}
@@ -4036,6 +4234,14 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 							$CPUName = $CPUMatch.Name
 							$CPUScore = $CPUMatch.CPUMark
 							$CPUReleaseDate = $CPUMatch.Release
+
+							if (!$JsonMatchSaved) {
+								$CPUMatching += [PSCustomObject]@{
+									CPU = $CPU
+									ID = $CPUMatch.ID
+								
+								}
+							}
 						} elseif (!$CPUName) {
 							$CPUName = $CleanName
 						}
@@ -4242,6 +4448,8 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				}
 			}
 		}
+
+		$CPUMatching | ConvertTo-Json | Out-File -FilePath ($CPUDataLocation + "\cpu_matching.json")
 
 		if (($BillingDevices | Measure-Object).count -gt 0) {
 			# Get device type counts
@@ -4589,23 +4797,23 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		Write-Host "Updating device locations..."
 		$WANs = Get-ITGlueFlexibleAssets -page_size 1000 -filter_flexible_asset_type_id $WANFilterID.id -filter_organization_id $ITG_ID
 		$LANs = Get-ITGlueFlexibleAssets -page_size 1000 -filter_flexible_asset_type_id $LANFilterID.id -filter_organization_id $ITG_ID
-		$ITGLocations = Get-ITGlueLocations -org_id $ITG_ID
+		if (!$ITGLocations) {
+			$ITGLocations = Get-ITGlueLocations -org_id $ITG_ID
+			$ITGLocations = $ITGLocations.data
+		}
 		if ($OverviewFilterID) {
 			$CustomOverviews = Get-ITGlueFlexibleAssets -filter_flexible_asset_type_id $OverviewFilterID.id -filter_organization_id $ITG_ID
 			$WANCustomOverviews = $CustomOverviews.data | Where-Object { $_.attributes.name -like "WAN: *" }
 			$LANCustomOverviews = $CustomOverviews.data | Where-Object { $_.attributes.name -like "LAN: *" }
 		}
-		$AutotaskLocations = Get-AutotaskAPIResource -Resource CompanyLocations -SimpleSearch "companyID eq $Autotask_ID"
-		$AutotaskLocations = $AutotaskLocations | Where-Object { $_.isActive -eq "True" }
 		$IPRegex = "\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(-(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)?)?(\/[1-3][0-9])?\b"
 
 		if ($LANs -and $LANs.data) {
 			$LANs = $LANs.data
 		}
 
-		if ($WANs -and $WANs.data -and ($WANs.data | Measure-Object).Count -gt 0 -and $ITG_Devices -and $ITGLocations -and $AutotaskLocations) {
+		if ($WANs -and $WANs.data -and ($WANs.data | Measure-Object).Count -gt 0 -and $ITG_Devices -and $ITGLocations -and $Autotask_Locations) {
 			$WANs = $WANs.data
-			$ITGLocations = $ITGLocations.data
 
 			$LocationIPs = @()
 			$LANIPs = @{}
@@ -4638,11 +4846,16 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						$TableData = $TableData | Where-Object { $_.innerHtml -notlike "*<strong>*</strong>*" }
 		
 						$ColCount = $TableHeaders.Count
+						if (!$ColCount) {
+							$ColCount = $TableData.Count
+						}
 						for ($i = 0; $i -le $TableData.count; $i++) {
 							$Column = $i % $ColCount
-							$Header = $TableHeaders[$Column].innerHTML
-							if ($Header -like "*DNS*" -or $Header -like "*Subnet*") {
-								continue
+							if ($TableHeaders -and $TableHeaders[$Column]) {
+								$Header = $TableHeaders[$Column].innerHTML
+								if ($Header -like "*DNS*" -or $Header -like "*Subnet*") {
+									continue
+								}
 							}
 							$IPHTML += "`n$($TableData[$i].innerHTML)"
 						}
@@ -4716,9 +4929,9 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					continue
 				}
 				
-				$AutotaskLocation = $AutotaskLocations | Where-Object { $_.name -like $Location.attributes.name }
+				$AutotaskLocation = $Autotask_Locations | Where-Object { $_.name -like $Location.attributes.name }
 				if (!$AutotaskLocation) {
-					$AutotaskLocation = $AutotaskLocations | Where-Object {
+					$AutotaskLocation = $Autotask_Locations | Where-Object {
 						$_.address1 -like $Location.attributes.'address-1' -and
 						$_.address2 -like $Location.attributes.'address-2' -and
 						$_.city -like $Location.attributes.city -and
@@ -4768,12 +4981,18 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						continue
 					}
 
-					$RMMDevice = $RMM_Devices | Where-Object { $_.'Device UID' -in $MatchedDevice.rmm_matches }
+					$RMMDevice = @()
+					foreach ($DeviceID in $MatchedDevice.rmm_matches) {
+						$RMMDevice += $RMM_DevicesHash[$DeviceID]
+					}
 					if ($RMMDevice) {
 						$ExternalIP = @($RMMDevice.extIpAddress)
 						$InternalIP = @($RMMDevice.intIpAddress)
 					} else {
-						$AutotaskDevice = $Autotask_Devices | Where-Object { $_.id -in $MatchedDevice.autotask_matches }
+						$AutotaskDevice = @()
+						foreach ($DeviceID in $MatchedDevice.autotask_matches) {
+							$AutotaskDevice += $Autotask_DevicesHash[$DeviceID]
+						}
 						$ExternalIP = @($AutotaskDevice.rmmDeviceAuditExternalIPAddress)
 						$InternalIP = @($AutotaskDevice.rmmDeviceAuditIPAddress)
 					}
@@ -4808,7 +5027,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					
 					# Populate WAN and LAN device lists for custom overviews
 					foreach ($ITG_DeviceID in $MatchedDevice.itg_matches) {
-						$ITGMatch = $ITG_Devices | Where-Object { $_.id -eq $ITG_DeviceID }
+						$ITGMatch = $ITG_DevicesHash[$ITG_DeviceID]
 
 						# If currently set location is in $PossibleLocations, use existing location
 						if ($ITGMatch.attributes.'location-id' -and $ITGMatch.attributes.'location-id' -in $PossibleLocations.Location) {
@@ -4841,7 +5060,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					}
 
 					foreach ($Autotask_DeviceID in $MatchedDevice.autotask_matches) {
-						$AutotaskMatch = $Autotask_Devices | Where-Object { $_.id -eq $Autotask_DeviceID }
+						$AutotaskMatch = $Autotask_DevicesHash[$Autotask_DeviceID]
 						$DeviceLocationsUpdateRan = $true
 						# If currently set location is in $PossibleLocations, dont update
 						if ($AutotaskMatch.companyLocationID -in $PossibleLocations.AutotaskLocation) {
@@ -4888,18 +5107,18 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 					# get list of recently seen devices
 					foreach ($MatchID in $WANDevices.Item($WAN_ID)) {
-						$MatchedDevice = $MatchedDevices | Where-Object { $_.id -eq $MatchID }
+						$MatchedDevice = $MatchedDevicesHash[$MatchID]
 						$Hostname = @($MatchedDevice.sc_hostname + $MatchedDevice.rmm_hostname + $MatchedDevice.sophos_hostname + $MatchedDevice.itg_hostname + $MatchedDevice.autotask_hostname) | Select-Object -First 1
 						$ITG_DeviceID = $null
 						if (($MatchedDevice.itg_matches | Measure-Object).Count -gt 0) {
-							$ITG_Device = $ITG_Devices | Where-Object { $_.id -eq ($MatchedDevice.itg_matches | Select-Object -First 1) }
+							$ITG_Device = $ITG_DevicesHash[($MatchedDevice.itg_matches | Select-Object -First 1)]
 							$HostnameAndURL = "<a href='$($ITG_Device.attributes.'resource-url')'>$Hostname</a>"
 							$ITG_DeviceID = $ITG_Device.id
 						}
 
 						if ($PreviousWANHistory -and ($Hostname -in $DevicePreviousHistory -or ($ITG_DeviceID -and $ITG_DeviceID -in $DevicePreviousHistory.DeviceID))) {
 							# Remove devices from previously seen if in current list
-							$DevicePreviousHistory = $DevicePreviousHistory | Where-Object { $_.DeviceName -notlike $Hostname }
+							$DevicePreviousHistory = $DevicePreviousHistory | Where-Object { $_.DeviceName -ne $Hostname }
 							if ($ITG_DeviceID) {
 								$DevicePreviousHistory = $DevicePreviousHistory | Where-Object { $_.DeviceID -ne $ITG_DeviceID }
 							}
@@ -4909,7 +5128,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 							continue
 						}
 
-						$ActivityComparison = compare_activity($MatchedDevice)
+						$ActivityComparison = $MatchedDevice.activity_comparison
 						$Activity = $ActivityComparison.Values | Sort-Object last_active
 						$LastSeen = ''
 						$LastSeenUTC = $null
@@ -4957,7 +5176,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 							}
 
 							$Hostname = @($MatchedDevice.sc_hostname + $MatchedDevice.rmm_hostname + $MatchedDevice.sophos_hostname + $MatchedDevice.itg_hostname + $MatchedDevice.autotask_hostname) | Select-Object -First 1
-							$ITG_Device = $ITG_Devices | Where-Object { $_.id -eq ($MatchedDevice.itg_matches | Select-Object -First 1) }
+							$ITG_Device = $ITG_DevicesHash[($MatchedDevice.itg_matches | Select-Object -First 1)]
 							$HostnameAndURL = "<a href='$($ITG_Device.attributes.'resource-url')'>$Hostname</a>"
 
 							if ($Hostname -in $DeviceHistory.DeviceName -or ($Device.DeviceID -and $Device.DeviceID -in $DeviceHistory.DeviceID)) {
@@ -5039,7 +5258,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						}
 					}
 					foreach ($Device in $DeviceHistory) {
-						$ITG_Device = $ITG_Devices | Where-Object { $_.id -eq $Device.DeviceID }
+						$ITG_Device = $ITG_DevicesHash[$Device.DeviceID]
 
 						$Note = ''
 						if ($Device.Type -eq 'Current') {
@@ -5102,18 +5321,18 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 					# get list of recently seen devices
 					foreach ($MatchID in $LANDevices.Item($LAN_ID)) {
-						$MatchedDevice = $MatchedDevices | Where-Object { $_.id -eq $MatchID }
+						$MatchedDevice = $MatchedDevicesHash[$MatchID]
 						$Hostname = @($MatchedDevice.sc_hostname + $MatchedDevice.rmm_hostname + $MatchedDevice.sophos_hostname + $MatchedDevice.itg_hostname + $MatchedDevice.autotask_hostname) | Select-Object -First 1
 						$ITG_DeviceID = $null
 						if (($MatchedDevice.itg_matches | Measure-Object).Count -gt 0) {
-							$ITG_Device = $ITG_Devices | Where-Object { $_.id -eq ($MatchedDevice.itg_matches | Select-Object -First 1) }
+							$ITG_Device = $ITG_DevicesHash[($MatchedDevice.itg_matches | Select-Object -First 1)]
 							$HostnameAndURL = "<a href='$($ITG_Device.attributes.'resource-url')'>$Hostname</a>"
 							$ITG_DeviceID = $ITG_Device.id
 						}
 
 						if ($PreviousLANHistory -and ($Hostname -in $DevicePreviousHistory -or ($ITG_DeviceID -and $ITG_DeviceID -in $DevicePreviousHistory.DeviceID))) {
 							# Remove devices from previously seen if in current list
-							$DevicePreviousHistory = $DevicePreviousHistory | Where-Object { $_.DeviceName -notlike $Hostname }
+							$DevicePreviousHistory = $DevicePreviousHistory | Where-Object { $_.DeviceName -ne $Hostname }
 							if ($ITG_DeviceID) {
 								$DevicePreviousHistory = $DevicePreviousHistory | Where-Object { $_.DeviceID -ne $ITG_DeviceID }
 							}
@@ -5123,7 +5342,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 							continue
 						}
 
-						$ActivityComparison = compare_activity($MatchedDevice)
+						$ActivityComparison = $MatchedDevice.activity_comparison
 						$Activity = $ActivityComparison.Values | Sort-Object last_active
 						$LastSeen = ''
 						if (($Activity | Measure-Object).count -gt 1) {
@@ -5169,7 +5388,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 							}
 
 							$Hostname = @($MatchedDevice.sc_hostname + $MatchedDevice.rmm_hostname + $MatchedDevice.sophos_hostname + $MatchedDevice.itg_hostname + $MatchedDevice.autotask_hostname) | Select-Object -First 1
-							$ITG_Device = $ITG_Devices | Where-Object { $_.id -eq ($MatchedDevice.itg_matches | Select-Object -First 1) }
+							$ITG_Device = $ITG_DevicesHash[($MatchedDevice.itg_matches | Select-Object -First 1)]
 							$HostnameAndURL = "<a href='$($ITG_Device.attributes.'resource-url')'>$Hostname</a>"
 
 							if ($Hostname -in $DeviceHistory.DeviceName -or ($Device.DeviceID -and $Device.DeviceID -in $DeviceHistory.DeviceID)) {
@@ -5251,7 +5470,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						}
 					}
 					foreach ($Device in $DeviceHistory) {
-						$ITG_Device = $ITG_Devices | Where-Object { $_.id -eq $Device.DeviceID }
+						$ITG_Device = $ITG_DevicesHash[$Device.DeviceID]
 
 						$Note = ''
 						if ($Device.Type -eq 'Current') {
