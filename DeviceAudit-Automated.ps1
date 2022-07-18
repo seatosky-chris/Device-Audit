@@ -1353,7 +1353,12 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		$EmailLink = ""
 		if ($ServiceTarget -eq 'rmm') {
 			$ID_Params."RMM_Device_ID" = $RMM_Device_ID
-			$EmailLink = "https://$($DattoAPIKey.Region).centrastage.net/csm/search?qs=uid%3A$($RMM_Device_ID)"
+			$RMMDevice = $RMM_DeviceHash[$RMM_Device_ID]
+			if ($RMMDevice.url) {
+				$EmailLink = $RMMDevice.url
+			} else {
+				$EmailLink = "https://$($DattoAPIKey.Region).centrastage.net/csm/search?qs=uid%3A$($RMM_Device_ID)"
+			}
 		} elseif ($ServiceTarget -eq 'sc') {
 			$ID_Params."SC_Device_ID" = $SC_Device_ID
 			$SCDevice = $SC_DevicesHash[$SC_Device_ID]
@@ -1769,6 +1774,11 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						} elseif ($RMMDevice.ToDelete) {
 							$Deleted = "Pending Deletion"
 						}
+						if ($RMMDevice.url) {
+							$EmailLink = $RMMDevice.url
+						} else {
+							$EmailLink = "https://$($DattoAPIKey.Region).centrastage.net/csm/search?qs=uid%3A$($OrderedDevice.id)"
+						}
 						$DuplicatesTable += [PsCustomObject]@{
 							type = "RMM"
 							hostname = $RMMDevice."Device Hostname"
@@ -1776,7 +1786,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 							last_active = $OrderedDevice.last_active
 							remove = if ($i -eq 0) { "No" } else { "Yes" }
 							auto_deleted = $Deleted
-							link = "https://$($DattoAPIKey.Region).centrastage.net/csm/search?qs=uid%3A$($OrderedDevice.id)"
+							link = $EmailLink
 						}
 						$i++
 					}
@@ -1956,7 +1966,11 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				$SCLink = "$($SCLogin.URL)/Host#Access/All%20Machines/$($SCDevices[0].Name)/$($SCDeviceIDs[0])"
 			}
 			if ($RMMDeviceIDs) {
-				$RMMLink = "https://$($DattoAPIKey.Region).centrastage.net/csm/search?qs=uid%3A$($RMMDeviceIDs[0])"
+				if ($RMMDevices[0].url) {
+					$RMMLink = $RMMDevices[0].url
+				} else {
+					$RMMLink = "https://$($DattoAPIKey.Region).centrastage.net/csm/search?qs=uid%3A$($RMMDeviceIDs[0])"
+				}
 			}
 			if ($SophosDeviceIDs) {
 				$SophosLink = "https://cloud.sophos.com/manage/devices/computers/$($SophosDevices[0].webID)"
@@ -2121,7 +2135,8 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						if ($DeviceType -eq 'sc') {
 							$Hostname = ($SC_DevicesHash[$DeviceID]).Name
 						} elseif ($DeviceType -eq 'rmm') {
-							$Hostname = ($RMM_DevicesHash[$DeviceID])."Device Hostname"
+							$RMMDevice = $RMM_DevicesHash[$DeviceID]
+							$Hostname = $RMMDevice."Device Hostname"
 						} elseif ($DeviceType -eq 'sophos') {
 							$SophosDevice = $Sophos_DevicesHash[$DeviceID]
 							$Hostname = $SophosDevice.hostname
@@ -2131,7 +2146,11 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						if ($DeviceType -eq 'sc') {
 							$Link = "$($SCLogin.URL)/Host#Access/All%20Machines/$($Hostname)/$($DeviceID)"
 						} elseif ($DeviceType -eq 'rmm') {
-							$Link = "https://$($DattoAPIKey.Region).centrastage.net/csm/search?qs=uid%3A$($DeviceID)"
+							if ($RMMDevice.url) {
+								$Link = $RMMDevice.url
+							} else {
+								$Link = "https://$($DattoAPIKey.Region).centrastage.net/csm/search?qs=uid%3A$($DeviceID)"
+							}
 						} else {
 							$Link = "https://cloud.sophos.com/manage/devices/computers/$($SophosDevice.webID)"
 						}
@@ -2361,7 +2380,11 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						$SCLink = "$($SCLogin.URL)/Host#Access/All%20Machines/$($SCDevices[0].Name)/$($SCDeviceIDs[0])"
 					}
 					if ($RMMDeviceIDs) {
-						$RMMLink = "https://$($DattoAPIKey.Region).centrastage.net/csm/search?qs=uid%3A$($RMMDeviceIDs[0])"
+						if ($RMMDevices[0].url) {
+							$RMMLink = $RMMDevices[0].url
+						} else {
+							$RMMLink = "https://$($DattoAPIKey.Region).centrastage.net/csm/search?qs=uid%3A$($RMMDeviceIDs[0])"
+						}
 					}
 					if ($SophosDeviceIDs) {
 						$SophosLink = "https://cloud.sophos.com/manage/devices/computers/$($SophosDevices[0].webID)"
@@ -2582,7 +2605,11 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						$SCLink = "$($SCLogin.URL)/Host#Access/All%20Machines/$($SCDevice.Name)/$($SCDeviceID)"
 					}
 					if ($RMMDeviceID) {
-						$RMMLink = "https://$($DattoAPIKey.Region).centrastage.net/csm/search?qs=uid%3A$($RMMDeviceID)"
+						if ($RMMDevice.url) {
+							$RMMLink = $RMMDevice.url
+						} else {
+							$RMMLink = "https://$($DattoAPIKey.Region).centrastage.net/csm/search?qs=uid%3A$($RMMDeviceID)"
+						}
 					}
 					if ($SophosDeviceID) {
 						$SophosLink = "https://cloud.sophos.com/manage/devices/computers/$($SophosDevice.webID)"
