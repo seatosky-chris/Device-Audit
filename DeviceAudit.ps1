@@ -2910,12 +2910,14 @@ if ($DOUsageDBSave) {
 		if ($Usage) {
 			# Get all existing monthly stats
 			$ComputerIDs = $Usage.ComputerID | Select-Object -Unique
-			$Query = "SELECT * FROM ComputerUsage AS cu WHERE cu.id IN ('$($ComputerIDs -join "', '")')"
+			$Query = "SELECT * FROM ComputerUsage AS cu"
 			$Existing_ComputerUsage = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "ComputerUsage" -Query $Query -QueryEnableCrossPartition $true
+			$Existing_ComputerUsage = $Existing_ComputerUsage | Where-Object { $_.Id -in $ComputerIDs }
 
 			$UserIDs = $Usage.UserID | Select-Object -Unique
-			$Query = "SELECT * FROM UserUsage AS uu WHERE uu.id IN ('$($UserIDs -join "', '")')"
+			$Query = "SELECT * FROM UserUsage AS uu"
 			$Existing_UserUsage = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "UserUsage" -Query $Query -QueryEnableCrossPartition $true
+			$Existing_UserUsage = $Existing_UserUsage | Where-Object { $_.Id -in $UserIDs }
 
 			# Group all usage stats from this past month by computer, user, and computer/user
 			$Monthly_UsageByComputer = $Usage | Select-Object ComputerID, UserID, UseDateTime, @{Name="Day"; E={ Get-Date $_.UseDateTime -Format 'dd' }} | Group-Object -Property ComputerID
