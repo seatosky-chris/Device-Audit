@@ -3900,10 +3900,9 @@ if ($DOUpdateDeviceLocations -and $ITGConnected -and $AutotaskConnected -and $IT
 	Write-Host "Updating device locations..."
 	$WANs = Get-ITGlueFlexibleAssets -page_size 1000 -filter_flexible_asset_type_id $WANFilterID.id -filter_organization_id $ITG_ID
 	$LANs = Get-ITGlueFlexibleAssets -page_size 1000 -filter_flexible_asset_type_id $LANFilterID.id -filter_organization_id $ITG_ID
-	if (!$ITGLocations) {
-		$ITGLocations = Get-ITGlueLocations -org_id $ITG_ID
-		$ITGLocations = $ITGLocations.data
-	}
+	$ITGLocations = Get-ITGlueLocations -org_id $ITG_ID
+	$ITGLocations = $ITGLocations.data
+	
 	if ($OverviewFilterID) {
 		$CustomOverviews = Get-ITGlueFlexibleAssets -filter_flexible_asset_type_id $OverviewFilterID.id -filter_organization_id $ITG_ID
 		$WANCustomOverviews = $CustomOverviews.data | Where-Object { $_.attributes.name -like "WAN: *" }

@@ -2533,6 +2533,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	$DeviceLocationsUpdateRan = $false
 	$MonthlyStatsUpdated = $false
 	$DeviceBillingUpdateRan = $false
+	$ITGLocations = $false 
 
 	# Check for devices that haven't been seen in a long time (in $InactiveDeleteDays) and suggest they be deleted
 	if ($DOInactiveSearch) {
