@@ -3692,6 +3692,8 @@ if ($DOBillingExport) {
 				$BillingDevices += [PsCustomObject]@{
 					Hostname = $Hostname
 					DeviceType = $DeviceType
+					Location = $Location
+					"Assigned User" = $AssignedUser
 					LastUser = $LastUser
 					SerialNumber = $SerialNumber
 					Manufacturer = $Manufacturer
@@ -3705,6 +3707,8 @@ if ($DOBillingExport) {
 			$AllDevices += [PsCustomObject]@{
 				Hostname = $Hostname
 				DeviceType = $DeviceType
+				Location = $Location
+				"Assigned User" = $AssignedUser
 				LastUser = $LastUser
 				SerialNumber = $SerialNumber
 				Manufacturer = $Manufacturer

@@ -4420,6 +4420,8 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					$BillingDevices += [PsCustomObject]@{
 						Hostname = $Hostname
 						DeviceType = $DeviceType
+						Location = $Location
+						"Assigned User" = $AssignedUser
 						LastUser = $LastUser
 						SerialNumber = $SerialNumber
 						Manufacturer = $Manufacturer
@@ -4433,6 +4435,8 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				$AllDevices += [PsCustomObject]@{
 					Hostname = $Hostname
 					DeviceType = $DeviceType
+					Location = $Location
+					"Assigned User" = $AssignedUser
 					LastUser = $LastUser
 					SerialNumber = $SerialNumber
 					Manufacturer = $Manufacturer
