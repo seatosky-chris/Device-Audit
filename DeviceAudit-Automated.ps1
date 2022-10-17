@@ -4428,6 +4428,8 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					InSC = if ($SCDeviceID) { "Yes" } else { "No" }
 					InRMM = if ($RMMDeviceID) { "Yes" } else { "No" }
 					InSophos = if ($SophosDeviceID) { "Yes" } else { "No" }
+					InITG = if ($ITGDeviceID) { "Yes" } else { "No" }
+					InAutotask = if ($AutotaskDeviceID) { "Yes" } else { "No" }
 					SC_Time = if ($ActivityComparison.sc) { $ActivityComparison.sc[0].last_active } else { "NA" }
 					RMM_Time = if ($ActivityComparison.rmm) { $ActivityComparison.rmm[0].last_active } else { "NA" }
 					Sophos_Time = if ($ActivityComparison.sophos) { $ActivityComparison.sophos[0].last_active } else { "NA" }
