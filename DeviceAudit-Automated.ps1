@@ -418,7 +418,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				$Device.serialNumber = $AuditDevice.bios.serialNumber
 				$Device.manufacturer = $AuditDevice.systemInfo.manufacturer
 				$Device.model = $AuditDevice.systemInfo.model
-				$Device.MacAddresses = @($AuditDevice.nics | Select-Object instance, macAddress)
+				$Device.MacAddresses = @($AuditDevice.nics | Where-Object { $Nic = $_; $_.macAddress -and ($NetworkAdapterBlacklist | Where-Object { $Nic.instance -like $_ }).Count -eq 0 } | Select-Object instance, macAddress)
 				$Device.memory = $AuditDevice.systemInfo.totalPhysicalMemory
 				$Device.cpus = $AuditDevice.processors
 				$Device.cpuCores = $AuditDevice.systemInfo.totalCpuCores
@@ -656,7 +656,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			)
 		})
 
-		# Get mac address matches only separately, then see if we can cross-reference them with RMM and ignore any that are from USB network adapters
+		# Get mac address matches only separately, then see if we can cross-reference them with RMM
 		$MacRelated_SCDevices = @($SC_Devices | Where-Object { 
 			$Device.SessionID -notlike $_.SessionID -and (
 				($Device.GuestHardwareNetworkAddress -and $_.GuestHardwareNetworkAddress -eq $Device.GuestHardwareNetworkAddress -and $Device.GuestMachineModel -notlike "Virtual Machine") 
@@ -664,7 +664,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		})
 		$MacRelated_SCDevices = $MacRelated_SCDevices | Where-Object {
 			$Related_RMMDeviceMacs = $RMM_Devices.MacAddresses | Where-Object { $_.macAddress -like $Device.GuestHardwareNetworkAddress }
-			if (($Related_RMMDeviceMacs | Measure-Object).Count -gt 0 -and $Related_RMMDeviceMacs.instance -notlike "*USB*" -and $Related_RMMDeviceMacs.instance -notlike "*Ethernet Adapter*") {
+			if (($Related_RMMDeviceMacs | Measure-Object).Count -gt 0 ) {
 				$_
 				return
 			}
@@ -757,19 +757,6 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				# Mac address  (if this is a VM, only check this if we haven't found any related devices so far. VM's can cause false positives with this search.)
 				if ($Device.GuestHardwareNetworkAddress -and (!$Related_RMMDevices -or $Device.GuestMachineModel -notlike "Virtual Machine")) {
 					$MacRelated_RMMDevices = $RMM_Devices | Where-Object { $_.MacAddresses.macAddress -contains $Device.GuestHardwareNetworkAddress -and $_."Device UID" -notin $IgnoreRMM }
-					if ($MacRelated_RMMDevices.MacAddresses.instance) {
-						$MacRelated_RMMDevices = $MacRelated_RMMDevices | Where-Object { 
-							# Remove any usb adapter mac matches unless the hostname also matches
-							$ConnectedMac = $_.MacAddresses | Where-Object { $_.macAddress -like $Device.GuestHardwareNetworkAddress }
-							if (($ConnectedMac.instance -like "*USB*" -or $ConnectedMac.instance -like "*Ethernet Adapter*") -and $Device.Name -notlike $_."Device Hostname" -and $Device.GuestMachineName -notlike $_."Device Hostname") {
-								$false
-								return
-							} else {
-								$_
-								return
-							}
-						}
-					}
 					$Related_RMMDevices += $MacRelated_RMMDevices
 				}
 
@@ -805,13 +792,6 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				}
 				if (($Related_RMMDevices_Filtered | Measure-Object).Count -gt 0) {
 					$Related_RMMDevices = $Related_RMMDevices_Filtered
-				}
-				if (($Related_RMMDevices_Filtered | Measure-Object).Count -gt 1) {
-					# If there is still more than 1 match, try removing any matches based on a USB network adapters mac address (but still keep them if the hostname matches)
-					$Related_RMMDevices_Filtered = $Related_RMMDevices_Filtered | Where-Object { $_."Device Hostname" -eq $Device.Name -or $_."Device Hostname" -eq $Device.GuestMachineName -or $_.MacAddresses.macAddress -notlike $Device.GuestHardwareNetworkAddress -or ($_.MacAddresses.macAddress -like $Device.GuestHardwareNetworkAddress -and $_.MacAddresses.instance -notlike "*USB*" -and $_.MacAddresses.instance -notlike "*Ethernet Adapter*") }
-					if (($Related_RMMDevices_Filtered | Measure-Object).Count -gt 0) {
-						$Related_RMMDevices = $Related_RMMDevices_Filtered
-					}
 				}
 			}
 
