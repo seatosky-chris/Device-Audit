@@ -96,6 +96,16 @@ $ITG_ID = ""
 #
 $Autotask_ID = ""
 
+####################
+# $JumpCloudAPIKey
+#
+# Your JumpCloud API key
+# Required for JumpCloud auditing to work
+#
+$JumpCloudAPIKey = @{
+	Key = ""
+}
+
 
 
 

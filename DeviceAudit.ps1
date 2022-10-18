@@ -27,6 +27,7 @@ If (Get-Module -ListAvailable -Name "Az.Resources") {Import-module Az.Resources 
 If (Get-Module -ListAvailable -Name "CosmosDB") {Import-module CosmosDB } Else { install-module CosmosDB  -Force; import-module CosmosDB }
 If (Get-Module -ListAvailable -Name "ITGlueAPI") {Import-module ITGlueAPI -Force} Else { install-module ITGlueAPI -Force; import-module ITGlueAPI -Force}
 If (Get-Module -ListAvailable -Name "AutotaskAPI") {Import-module AutotaskAPI -Force} Else { install-module AutotaskAPI -Force; import-module AutotaskAPI -Force}
+If (Get-Module -ListAvailable -Name "JumpCloud") {Import-module JumpCloud -Force} Else { install-module JumpCloud -Force; import-module JumpCloud -Force}
 If (Get-Module -ListAvailable -Name "Subnet") {Import-module Subnet -Force} Else { install-module Subnet -Force; import-module Subnet -Force}
 
 # Connect to Azure
@@ -121,6 +122,13 @@ if ($AutotaskAPIKey.Key) {
 	$AutotaskConnected = $true
 }
 
+# Connect to JumpCloud (if applicable)
+$JCConnected = $false
+if ($JumpCloudAPIKey -and $JumpCloudAPIKey.Key) {
+	Connect-JCOnline -JumpCloudApiKey $JumpCloudAPIKey.Key
+	$JCConnected = $true
+}
+
 # Get all devices from RMM
 $RMM_Devices = @()
 if ($RMM_ID) {
@@ -163,6 +171,16 @@ if ($AutotaskConnected -and $Autotask_ID) {
 $Autotask_DevicesHash = @{}
 foreach ($Device in $Autotask_Devices) { 
 	$Autotask_DevicesHash[$Device.id] = $Device
+}
+
+# Get all devices from JumpCloud
+$JC_Devices = @()
+if ($JCConnected) {
+	$JC_Devices = Get-JCSystem
+}
+$JC_DevicesHash = @{}
+foreach ($Device in $JC_Devices) { 
+	$JC_DevicesHash[$Device.id] = $Device
 }
 
 # Get all devices from SC
@@ -524,6 +542,8 @@ foreach ($Device in $SC_Devices) {
 			itg_hostname = @()
 			autotask_matches = @()
 			autotask_hostname = @()
+			jc_matches = @()
+			jc_hostname = @()
 		}
 
 	} else {
@@ -539,6 +559,8 @@ foreach ($Device in $SC_Devices) {
 			itg_hostname = @()
 			autotask_matches = @()
 			autotask_hostname = @()
+			jc_matches = @()
+			jc_hostname = @()
 		}
 	}
 }
@@ -672,6 +694,8 @@ foreach ($Device in $RMM_Devices) {
 		itg_hostname = @()
 		autotask_matches = @()
 		autotask_hostname = @()
+		jc_matches = @()
+		jc_hostname = @()
 	}
 }
 
@@ -717,6 +741,8 @@ foreach ($Device in $Sophos_Devices) {
 				itg_hostname = @()
 				autotask_matches = @()
 				autotask_hostname = @()
+				jc_matches = @()
+				jc_hostname = @()
 			}
 		}
 		continue;
@@ -1045,9 +1071,122 @@ if ($AutotaskConnected) {
 	}
 }
 
+# Match devices to JumpCloud
+if ($JCConnected) {
+	foreach ($Device in $JC_Devices) {
+		$RelatedDevices = @()
+
+		# JumpCloud to RMM Matches
+		$Related_RMMDevices = @()
+		$Related_RMMDevices += ($RMM_Devices | Where-Object { 
+			$Device.displayName -like $_.'Device Hostname' -or
+			($Device.hostname -like $_.'Device Hostname' -and $Device.hostname) -or 
+			$Device.displayName -like $_.'Device Description' -or 
+			($Device.hostname -like $_.'Device Description' -and $Device.hostname) -or 
+			($Device.serialNumber -like $_.'Serial Number' -and $Device.serialNumber -and $Device.serialNumber -notin $IgnoreSerials -and $Device.serialNumber -notlike "123456789*")
+		})
+
+		# Narrow down if more than 1 device found
+		if (($Related_RMMDevices | Measure-Object).Count -gt 1) {
+			$Related_RMMDevices_Filtered = $Related_RMMDevices | Where-Object { 
+				$Device.hostname -like $_.'Device Hostname' -and
+				$Device.serialNumber -like $_.'Serial Number'
+			}
+			if (($Related_RMMDevices_Filtered | Measure-Object).Count -gt 0) {
+				$Related_RMMDevices = $Related_RMMDevices_Filtered
+			}
+		}
+		if (($Related_RMMDevices | Measure-Object).Count -gt 1) {
+			$Related_RMMDevices_Filtered = $Related_RMMDevices | Where-Object { 
+				$Device.serialNumber -eq $_.'Serial Number'
+			}
+			if (($Related_RMMDevices_Filtered | Measure-Object).Count -gt 0) {
+				$Related_RMMDevices = $Related_RMMDevices_Filtered
+			}
+		}
+
+		# Get existing matches and connect
+		$Related_RMMDevices | ForEach-Object {
+			$RMM_DeviceID = $_."Device UID"
+			$RelatedDevices += ($MatchedDevices | Where-Object { $RMM_DeviceID -in $_.rmm_matches })
+		}
+
+
+		# JumpCloud to SC Matches (fallback)
+		if (!$RelatedDevices) {
+			$Related_SCDevices = @()
+			$Related_SCDevices += ($SC_Devices | Where-Object {
+				$Device.displayName -like $_.Name -or 
+				($Device.hostname -like $_.Name -and $Device.hostname) -or 
+				$Device.displayName -like $_.GuestMachineName -or 
+				($Device.hostname -like $_.GuestMachineName -and $Device.hostname) -or 
+				($Device.serialNumber -like $_.GuestMachineSerialNumber -and $Device.serialNumber -and $Device.serialNumber -notin $IgnoreSerials -and $Device.serialNumber -notlike "123456789*")
+			})
+
+			# Narrow down if more than 1 device found
+			if (($Related_SCDevices | Measure-Object).Count -gt 1) {
+				$Related_SCDevices_Filtered = $Related_SCDevices | Where-Object { 
+					$Device.hostname -like $_.Name -and
+					$Device.serialNumber -like $_.GuestMachineSerialNumber
+				}
+				if (($Related_SCDevices_Filtered | Measure-Object).Count -gt 0) {
+					$Related_SCDevices = $Related_SCDevices_Filtered
+				}
+			}
+			if (($Related_SCDevices | Measure-Object).Count -gt 1) {
+				$Related_SCDevices_Filtered = $Related_SCDevices | Where-Object { 
+					$Device.hostname -like $_.GuestMachineName -and
+					$Device.serialNumber -like $_.GuestMachineSerialNumber
+				}
+				if (($Related_SCDevices_Filtered | Measure-Object).Count -gt 0) {
+					$Related_SCDevices = $Related_SCDevices_Filtered
+				}
+			}
+			if (($Related_SCDevices | Measure-Object).Count -gt 1) {
+				$Related_SCDevices_Filtered = $Related_SCDevices | Where-Object { 
+					$Device.serialNumber -like $_.GuestMachineSerialNumber
+				}
+				if (($Related_SCDevices_Filtered | Measure-Object).Count -gt 0) {
+					$Related_SCDevices = $Related_SCDevices_Filtered
+				}
+			}
+
+			# Get existing matches and connect
+			$Related_SCDevices | ForEach-Object {
+				$SC_DeviceID = $_.SessionID
+				$RelatedDevices += ($MatchedDevices | Where-Object { $SC_DeviceID -in $_.sc_matches })
+			}
+		}
+
+		# JumpCloud to Sophos Matches (fallback)
+		if (!$RelatedDevices) {
+			$Related_SophosDevices = @()
+			$Related_SophosDevices += ($Sophos_Devices | Where-Object {
+				$Device.displayName -eq $_.hostname -or
+				($Device.hostname -like $_.hostname -and $Device.hostname)
+			})
+
+			# If matching is for MacOS devices and multiple are found, skip matching
+			if (($Related_SophosDevices | Measure-Object).Count -gt 1 -and $Related_SophosDevices.OS -like "*macOS*") {
+				continue
+			}
+		}
+
+		$RelatedDevices = $RelatedDevices | Sort-Object id -Unique
+
+		# Got all related devices, updated $MatchedDevices
+		if (($RelatedDevices | Measure-Object).Count -gt 0) {
+			foreach ($MatchedDevice in $RelatedDevices) {
+				$MatchedDevice.jc_matches += @($Device.id)
+				$MatchedDevice.jc_hostname += @($Device.hostname)
+			}
+		}
+	}
+}
+
 Write-Host "Matching Complete!"
 Write-Host "===================="
-$MatchedDevices | Select-Object id, @{N="sc_hostname"; E={$_.sc_hostname -join ', '}}, @{N="rmm_hostname"; E={$_.rmm_hostname -join ', '}}, @{N="sophos_hostname"; E={$_.sophos_hostname -join ', '}}, @{N="itg_hostname"; E={$_.itg_hostname -join ', '}}, @{N="autotask_hostname"; E={$_.autotask_hostname -join ', '}} | Out-GridView -PassThru -Title "Matched Devices"
+$MatchedDevices | Select-Object id, @{N="sc_hostname"; E={$_.sc_hostname -join ', '}}, @{N="rmm_hostname"; E={$_.rmm_hostname -join ', '}}, @{N="sophos_hostname"; E={$_.sophos_hostname -join ', '}}, @{N="itg_hostname"; E={$_.itg_hostname -join ', '}}, @{N="autotask_hostname"; E={$_.autotask_hostname -join ', '}}, @{N="jumpcloud_hostname"; E={$_.jc_hostname -join ', '}} | Out-GridView -PassThru -Title "Matched Devices"
 
 # Get the existing log
 $LogFilePath = "$($LogLocation)\$($Company_Acronym)_log.json"
@@ -3326,6 +3465,7 @@ if ($DOBillingExport) {
 			$SophosDeviceID = if ($ActivityComparison.sophos) { $ActivityComparison.sophos[0].id } else { $false }
 			$ITGDeviceID = if (($Device.itg_matches | Measure-Object).Count -gt 0) { $Device.itg_matches[0] } else { $false }
 			$AutotaskDeviceID = if (($Device.autotask_matches | Measure-Object).Count -gt 0) { $Device.autotask_matches[0] } else { $false }
+			$JumpCloudDeviceID = if (($Device.jc_matches | Measure-Object).Count -gt 0) { $Device.jc_matches[0] } else { $false }
 
 			$Hostname = $false
 			$SerialNumber = $false
@@ -3423,6 +3563,19 @@ if ($DOBillingExport) {
 				if (!$WarrantyStart) {
 					$WarrantyStart = $ITGDevice.attributes.'purchased-at'
 				}
+			}
+			if ($JumpCloudDeviceID) {
+				$JumpCloudDevice = @()
+				foreach ($DeviceID in $Device.jc_matches) {
+					$JumpCloudDevice += $JC_DevicesHash[$DeviceID]
+				}
+				$JCLastContact = @()
+				$JumpCloudDevice.lastContact | ForEach-Object {
+					if ($_) {
+						$JCLastContact += [DateTime]$_
+					}
+				}
+				$JCLastContact = $JCLastContact | Sort-Object -Descending | Select-Object -First 1
 			}
 			if ($SCDeviceID) {
 				$SCDevice = $SC_DevicesHash[$SCDeviceID]
@@ -3704,7 +3857,7 @@ if ($DOBillingExport) {
 				}
 			}
 
-			$AllDevices += [PsCustomObject]@{
+			$DeviceInfo = [PsCustomObject]@{
 				Hostname = $Hostname
 				DeviceType = $DeviceType
 				Location = $Location
@@ -3722,12 +3875,19 @@ if ($DOBillingExport) {
 				InSophos = if ($SophosDeviceID) { "Yes" } else { "No" }
 				InITG = if ($ITGDeviceID) { "Yes" } else { "No" }
 				InAutotask = if ($AutotaskDeviceID) { "Yes" } else { "No" }
+				InJumpCloud = if ($JumpCloudDeviceID) { if ($JumpCloudDevice.active) { "Yes (Active)" } else { "Yes (Inactive)" } } else { "No" }
 				SC_Time = if ($ActivityComparison.sc) { $ActivityComparison.sc[0].last_active } else { "NA" }
 				RMM_Time = if ($ActivityComparison.rmm) { $ActivityComparison.rmm[0].last_active } else { "NA" }
 				Sophos_Time = if ($ActivityComparison.sophos) { $ActivityComparison.sophos[0].last_active } else { "NA" }
+				JumpCloud_Time = if ($JCLastContact) { $JCLastContact } else { "NA" }
 				SophosTamperProtectionKey = $SophosTamperKey
 				SophosTamperStatus = if ($SophosTamperStatus) { "On" } else { "Off" }
 			}
+			if (!$JCConnected) {
+				$DeviceInfo.PSObject.Properties.Remove('InJumpCloud')
+				$DeviceInfo.PSObject.Properties.Remove('JumpCloud_Time')
+			}
+			$AllDevices += $DeviceInfo
 
 			if ($DeviceType -eq "Server" -or $Model -like "*Virtual *" -or !$DoAssetReport) {
 				continue
