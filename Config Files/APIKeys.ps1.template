@@ -67,6 +67,21 @@ $SCLogin = @{
 #
 $SC_Nonce = ""
 
+# $AzureAppCredentials
+#
+# The login details for an Azure app that gives access to Azure and Intune devices
+# See the readme and AzureAuthApp.ps1 script for more info on setting this up
+# You also must include the Azure Tenant ID in each organizations config file. You can
+# run ViewAzureTenants.ps1 to see the full list of Tenant ID's connected to your Partner portal.
+#
+# Not required, but if setup, the audit will link devices to Azure and Intune
+#
+$AzureAppCredentials = @{
+	AppID = ""
+	TenantID = ""
+	ClientSecret = ""
+}
+
 # $Email_APIKey
 #
 # The global APIKey for the email forwarder. The key should give access to all organizations.

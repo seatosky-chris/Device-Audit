@@ -66,6 +66,9 @@ if ($CurrentTLS -notlike "*Tls12" -and $CurrentTLS -notlike "*Tls13") {
 If (Get-Module -ListAvailable -Name "ImportExcel") {Import-module ImportExcel} Else { install-module ImportExcel -Force; import-module ImportExcel}
 If (Get-Module -ListAvailable -Name "Az.Accounts") {Import-module Az.Accounts } Else { install-module Az.Accounts  -Force; import-module Az.Accounts }
 If (Get-Module -ListAvailable -Name "Az.Resources") {Import-module Az.Resources } Else { install-module Az.Resources  -Force; import-module Az.Resources }
+If (Get-Module -ListAvailable -Name "Microsoft.Graph.Authentication") {Import-module Microsoft.Graph.Authentication -Force} Else { install-module Microsoft.Graph -Force; import-module Microsoft.Graph.Authentication -Force}
+If (Get-Module -ListAvailable -Name "Microsoft.Graph.Identity.DirectoryManagement") {Import-module Microsoft.Graph.Identity.DirectoryManagement -Force}
+If (Get-Module -ListAvailable -Name "Microsoft.Graph.DeviceManagement") {Import-module Microsoft.Graph.DeviceManagement -Force}
 If (Get-Module -ListAvailable -Name "CosmosDB") {Import-module CosmosDB } Else { install-module CosmosDB  -Force; import-module CosmosDB }
 If (Get-Module -ListAvailable -Name "DattoRMM") {Import-module DattoRMM -Force} Else { install-module DattoRMM -Force; import-module DattoRMM -Force}
 If (Get-Module -ListAvailable -Name "ITGlueAPI") {Import-module ITGlueAPI -Force} Else { install-module ITGlueAPI -Force; import-module ITGlueAPI -Force}
@@ -315,6 +318,28 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		$OrgFullName = $Company_Acronym
 	}
 
+	# Connect to Microsoft Graph (for Azure/Intune)
+	$AzureConnected = $false
+	if ($AzureAppCredentials -and $Azure_TenantID) {
+		$AuthBody = @{
+			grant_type		= "client_credentials"
+			scope			= "https://graph.microsoft.com/.default"
+			client_id		= $AzureAppCredentials.AppID
+			client_secret	= $AzureAppCredentials.ClientSecret
+		}
+
+		$conn = Invoke-RestMethod `
+			-Uri "https://login.microsoftonline.com/$Azure_TenantID/oauth2/v2.0/token" `
+			-Method POST `
+			-Body $AuthBody
+
+		$AzureToken = $conn.access_token
+		$MgGraphConnect = Connect-MgGraph -AccessToken $AzureToken
+		if ($MgGraphConnect -eq "Welcome To Microsoft Graph!") {
+			$AzureConnected = $true
+		}
+	}
+
 	############
 	# Connect to the Sophos API to get the device list from Sophos
 	############
@@ -464,6 +489,22 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		$Autotask_DevicesHash[$Device.id] = $Device
 	}
 
+	# Get all devices from Azure & Intune
+	$Azure_Devices = @()
+	$Intune_Devices = @()
+	if ($AzureConnected) {
+		$Azure_Devices = Get-MgDevice -All | Where-Object { $_.OperatingSystem -notin @("Android", "iOS") }
+		$Intune_Devices = Get-MgDeviceManagementManagedDevice | Where-Object { $_.OperatingSystem -notin @("Android", "iOS") }
+	}
+	$Azure_DevicesHash = @{}
+	$Intune_DevicesHash = @{}
+	foreach ($Device in $Azure_Devices) { 
+		$Azure_DevicesHash[$Device.id] = $Device
+	}
+	foreach ($Device in $Intune_Devices) { 
+		$Intune_DevicesHash[$Device.Id] = $Device
+	}
+
 	# Get all devices from JumpCloud
 	$JC_Devices = @()
 	if ($JCConnected) {
@@ -472,6 +513,16 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	$JC_DevicesHash = @{}
 	foreach ($Device in $JC_Devices) { 
 		$JC_DevicesHash[$Device.id] = $Device
+	}
+
+	$JC_Users = @()
+	if (($JC_Devices | Measure-Object).Count -gt 0) {
+		foreach ($Device in $JC_Devices) {
+			$UserInfo = Get-JCSystemUser -SystemID $Device.id
+			if ($UserInfo) {
+				$JC_Users += $UserInfo
+			}
+		}
 	}
 
 	Write-Output "Imported all devices."
@@ -709,6 +760,11 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				autotask_hostname = @()
 				jc_matches = @()
 				jc_hostname = @()
+				azure_matches = @()
+				azure_hostname = @()
+				azure_match_warning = @()
+				intune_matches = @()
+				intune_hostname = @()
 			}
 
 		} else {
@@ -726,6 +782,11 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				autotask_hostname = @()
 				jc_matches = @()
 				jc_hostname = @()
+				azure_matches = @()
+				azure_hostname = @()
+				azure_match_warning = @()
+				intune_matches = @()
+				intune_hostname = @()
 			}
 		}
 	}
@@ -845,6 +906,11 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			autotask_hostname = @()
 			jc_matches = @()
 			jc_hostname = @()
+			azure_matches = @()
+			azure_hostname = @()
+			azure_match_warning = @()
+			intune_matches = @()
+			intune_hostname = @()
 		}
 	}
 
@@ -896,6 +962,11 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					autotask_hostname = @()
 					jc_matches = @()
 					jc_hostname = @()
+					azure_matches = @()
+					azure_hostname = @()
+					azure_match_warning = @()
+					intune_matches = @()
+					intune_hostname = @()
 				}
 			}
 			continue;
@@ -1025,6 +1096,11 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					autotask_hostname = @()
 					jc_matches = @()
 					jc_hostname = @()
+					azure_matches = @()
+					azure_hostname = @()
+					azure_match_warning = @()
+					intune_matches = @()
+					intune_hostname = @()
 				}
 			}
 		}
@@ -1115,6 +1191,12 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				# If matching is for MacOS devices and multiple are found, skip matching
 				if (($Related_SophosDevices | Measure-Object).Count -gt 1 -and $Related_SophosDevices.OS -like "*macOS*") {
 					continue
+				}
+
+				# Get existing matches and connect
+				$Related_SophosDevices | ForEach-Object {
+					$Sophos_DeviceID = $_.id
+					$RelatedDevices += ($MatchedDevices | Where-Object { $Sophos_DeviceID -in $_.sophos_matches })
 				}
 			}
 
@@ -1335,6 +1417,12 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				if (($Related_SophosDevices | Measure-Object).Count -gt 1 -and $Related_SophosDevices.OS -like "*macOS*") {
 					continue
 				}
+
+				# Get existing matches and connect
+				$Related_SophosDevices | ForEach-Object {
+					$Sophos_DeviceID = $_.id
+					$RelatedDevices += ($MatchedDevices | Where-Object { $Sophos_DeviceID -in $_.sophos_matches })
+				}
 			}
 
 			$RelatedDevices = $RelatedDevices | Sort-Object id -Unique
@@ -1348,6 +1436,242 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			}
 		}
 	}
+
+	# Match devices to Intune
+	if ($AzureConnected) {
+		foreach ($Device in $Intune_Devices) {
+			$RelatedDevices = @()
+
+			# Intune to RMM Matches
+			$Related_RMMDevices = @()
+			$Related_RMMDevices += ($RMM_Devices | Where-Object { 
+				$Device.DeviceName -like $_.'Device Hostname' -or
+				$Device.DeviceName -like $_.'Device Description' -or 
+				($Device.SerialNumber -like $_.'Serial Number' -and $Device.SerialNumber -and $Device.SerialNumber -notin $IgnoreSerials -and $Device.SerialNumber -notlike "123456789*")
+			})
+
+			# Narrow down if more than 1 device found
+			if (($Related_RMMDevices | Measure-Object).Count -gt 1) {
+				$Related_RMMDevices_Filtered = $Related_RMMDevices | Where-Object { 
+					$Device.DeviceName -like $_.'Device Hostname' -and
+					$Device.SerialNumber -like $_.'Serial Number'
+				}
+				if (($Related_RMMDevices_Filtered | Measure-Object).Count -gt 0) {
+					$Related_RMMDevices = $Related_RMMDevices_Filtered
+				}
+			}
+			if (($Related_RMMDevices | Measure-Object).Count -gt 1) {
+				$Related_RMMDevices_Filtered = $Related_RMMDevices | Where-Object { 
+					$Device.SerialNumber -eq $_.'Serial Number'
+				}
+				if (($Related_RMMDevices_Filtered | Measure-Object).Count -gt 0) {
+					$Related_RMMDevices = $Related_RMMDevices_Filtered
+				}
+			}
+
+			# Get existing matches and connect
+			$Related_RMMDevices | ForEach-Object {
+				$RMM_DeviceID = $_."Device UID"
+				$RelatedDevices += ($MatchedDevices | Where-Object { $RMM_DeviceID -in $_.rmm_matches })
+			}
+
+
+			# Intune to SC Matches (fallback)
+			if (!$RelatedDevices) {
+				$Related_SCDevices = @()
+				$Related_SCDevices += ($SC_Devices | Where-Object {
+					$Device.DeviceName -like $_.Name -or 
+					$Device.DeviceName -like $_.GuestMachineName -or 
+					($Device.SerialNumber -like $_.GuestMachineSerialNumber -and $Device.SerialNumber -and $Device.SerialNumber -notin $IgnoreSerials -and $Device.SerialNumber -notlike "123456789*")
+				})
+
+				# Narrow down if more than 1 device found
+				if (($Related_SCDevices | Measure-Object).Count -gt 1) {
+					$Related_SCDevices_Filtered = $Related_SCDevices | Where-Object { 
+						$Device.DeviceName -like $_.Name -and
+						$Device.SerialNumber -like $_.GuestMachineSerialNumber
+					}
+					if (($Related_SCDevices_Filtered | Measure-Object).Count -gt 0) {
+						$Related_SCDevices = $Related_SCDevices_Filtered
+					}
+				}
+				if (($Related_SCDevices | Measure-Object).Count -gt 1) {
+					$Related_SCDevices_Filtered = $Related_SCDevices | Where-Object { 
+						$Device.DeviceName -like $_.GuestMachineName -and
+						$Device.SerialNumber -like $_.GuestMachineSerialNumber
+					}
+					if (($Related_SCDevices_Filtered | Measure-Object).Count -gt 0) {
+						$Related_SCDevices = $Related_SCDevices_Filtered
+					}
+				}
+				if (($Related_SCDevices | Measure-Object).Count -gt 1) {
+					$Related_SCDevices_Filtered = $Related_SCDevices | Where-Object { 
+						$Device.SerialNumber -like $_.GuestMachineSerialNumber
+					}
+					if (($Related_SCDevices_Filtered | Measure-Object).Count -gt 0) {
+						$Related_SCDevices = $Related_SCDevices_Filtered
+					}
+				}
+
+				# Get existing matches and connect
+				$Related_SCDevices | ForEach-Object {
+					$SC_DeviceID = $_.SessionID
+					$RelatedDevices += ($MatchedDevices | Where-Object { $SC_DeviceID -in $_.sc_matches })
+				}
+			}
+
+			# Intune to Sophos Matches (fallback)
+			if (!$RelatedDevices) {
+				$Related_SophosDevices = @()
+				$Related_SophosDevices += ($Sophos_Devices | Where-Object {
+					$Device.DeviceName -eq $_.hostname
+				})
+
+				# If matching is for MacOS devices and multiple are found, skip matching
+				if (($Related_SophosDevices | Measure-Object).Count -gt 1 -and $Related_SophosDevices.OS -like "*macOS*") {
+					continue
+				}
+
+				# Get existing matches and connect
+				$Related_SophosDevices | ForEach-Object {
+					$Sophos_DeviceID = $_.id
+					$RelatedDevices += ($MatchedDevices | Where-Object { $Sophos_DeviceID -in $_.sophos_matches })
+				}
+			}
+
+			$RelatedDevices = $RelatedDevices | Sort-Object id -Unique
+
+			# Got all related devices, update $MatchedDevices
+			if (($RelatedDevices | Measure-Object).Count -gt 0) {
+				foreach ($MatchedDevice in $RelatedDevices) {
+					$MatchedDevice.intune_matches += @($Device.id)
+					$MatchedDevice.intune_hostname += @($Device.DeviceName)
+				}
+			}
+		}
+	}
+
+	# Match devices to Azure
+	if ($AzureConnected) {
+		foreach ($Device in $Azure_Devices) {
+			$RelatedDevices = @()
+			$MatchWarning = $false
+
+			# Azure to Intune Matches
+			$Related_IntuneDevices = @()
+			$Related_IntuneDevices += ($Intune_Devices | Where-Object {
+				$Device.DeviceId -like $_.AzureAdDeviceId
+			})
+
+			# Get existing matches and connect
+			$Related_IntuneDevices | ForEach-Object {
+				$Azure_DeviceID = $_.Id
+				$RelatedDevices += ($MatchedDevices | Where-Object { $Azure_DeviceID -in $_.intune_matches })
+			}
+
+			# Azure to RMM Matches
+			if (!$RelatedDevices) {
+				$Related_RMMDevices = @()
+				$Related_RMMDevices += ($RMM_Devices | Where-Object { 
+					$Device.DisplayName -like $_.'Device Hostname' -or
+					$Device.DisplayName -like $_.'Device Description'
+				})
+
+				# Narrow down if more than 1 device found
+				if (($Related_RMMDevices | Measure-Object).Count -gt 1) {
+					$Related_RMMDevices_Filtered = $Related_RMMDevices | Where-Object { 
+						$Device.DisplayName -like $_.'Device Hostname'
+					}
+					if (($Related_RMMDevices_Filtered | Measure-Object).Count -gt 0) {
+						$Related_RMMDevices = $Related_RMMDevices_Filtered
+					}
+				}
+
+				if (($Related_RMMDevices | Measure-Object).Count -gt 1 -and ($Related_RMMDevices."Serial Number" | Sort-Object -Unique | Measure-Object).Count -gt 1) {
+					$MatchWarning = $true
+				}
+
+				# Get existing matches and connect
+				$Related_RMMDevices | ForEach-Object {
+					$RMM_DeviceID = $_."Device UID"
+					$RelatedDevices += ($MatchedDevices | Where-Object { $RMM_DeviceID -in $_.rmm_matches })
+				}
+			}
+
+
+			# Intune to SC Matches (fallback)
+			if (!$RelatedDevices) {
+				$Related_SCDevices = @()
+				$Related_SCDevices += ($SC_Devices | Where-Object {
+					$Device.DisplayName -like $_.Name -or 
+					$Device.DisplayName -like $_.GuestMachineName
+				})
+
+				# Narrow down if more than 1 device found
+				if (($Related_SCDevices | Measure-Object).Count -gt 1) {
+					$Related_SCDevices_Filtered = $Related_SCDevices | Where-Object { 
+						$Device.DisplayName -like $_.Name
+					}
+					if (($Related_SCDevices_Filtered | Measure-Object).Count -gt 0) {
+						$Related_SCDevices = $Related_SCDevices_Filtered
+					}
+				}
+				if (($Related_SCDevices | Measure-Object).Count -gt 1) {
+					$Related_SCDevices_Filtered = $Related_SCDevices | Where-Object { 
+						$Device.DisplayName -like $_.GuestMachineName
+					}
+					if (($Related_SCDevices_Filtered | Measure-Object).Count -gt 0) {
+						$Related_SCDevices = $Related_SCDevices_Filtered
+					}
+				}
+
+				if (($Related_SCDevices | Measure-Object).Count -gt 1 -and ($Related_SCDevices.GuestMachineSerialNumber | Sort-Object -Unique | Measure-Object).Count -gt 1) {
+					$MatchWarning = $true
+				}
+
+				# Get existing matches and connect
+				$Related_SCDevices | ForEach-Object {
+					$SC_DeviceID = $_.SessionID
+					$RelatedDevices += ($MatchedDevices | Where-Object { $SC_DeviceID -in $_.sc_matches })
+				}
+			}
+
+			# Intune to Sophos Matches (fallback)
+			if (!$RelatedDevices) {
+				$Related_SophosDevices = @()
+				$Related_SophosDevices += ($Sophos_Devices | Where-Object {
+					$Device.DisplayName -eq $_.hostname
+				})
+
+				# If matching is for MacOS devices and multiple are found, skip matching
+				if (($Related_SophosDevices | Measure-Object).Count -gt 1 -and $Related_SophosDevices.OS -like "*macOS*") {
+					continue
+				}
+
+				if (($Related_SophosDevices | Measure-Object).Count -gt 1) {
+					$MatchWarning = $true
+				}
+
+				# Get existing matches and connect
+				$Related_SophosDevices | ForEach-Object {
+					$Sophos_DeviceID = $_.id
+					$RelatedDevices += ($MatchedDevices | Where-Object { $Sophos_DeviceID -in $_.sophos_matches })
+				}
+			}
+
+			$RelatedDevices = $RelatedDevices | Sort-Object id -Unique
+
+			# Got all related devices, update $MatchedDevices
+			if (($RelatedDevices | Measure-Object).Count -gt 0) {
+				foreach ($MatchedDevice in $RelatedDevices) {
+					$MatchedDevice.azure_matches += @($Device.id)
+					$MatchedDevice.azure_hostname += @($Device.DisplayName)
+					$MatchedDevice.azure_match_warning = $MatchWarning
+				}
+			}
+		}
+	}
+
 
 	# Export matched devices json to file
 	if ($MatchedDevicesLocation) {
@@ -1644,7 +1968,59 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		return
 	}
 
-	# Helper function that takes a $MatchedDevices object and returns the activity comparison for SC, RMM, and Sophos
+	function compare_activity_azure($DeviceIDs) {
+		$AzureDevices = @()
+		foreach ($DeviceID in $DeviceIDs) {
+			$AzureDevices += $Azure_DevicesHash[$DeviceID]
+		}
+		$DevicesOutput = @()
+
+		foreach ($Device in $AzureDevices) {
+			$DeviceOutputObj = [PsCustomObject]@{
+				type = "azure"
+				id = $Device.id
+				last_active = $null
+			}
+
+			if ($Device.ApproximateLastSignInDateTime -and [string]$Device.ApproximateLastSignInDateTime -as [DateTime]) {
+				$DeviceOutputObj.last_active = [DateTime]$Device.ApproximateLastSignInDateTime
+				$DevicesOutput += $DeviceOutputObj
+			}
+		}
+
+		$DevicesOutput = $DevicesOutput | Sort-Object last_active -Desc
+
+		$DevicesOutput
+		return
+	}
+
+	function compare_activity_intune($DeviceIDs) {
+		$IntuneDevices = @()
+		foreach ($DeviceID in $DeviceIDs) {
+			$IntuneDevices += $Intune_DevicesHash[$DeviceID]
+		}
+		$DevicesOutput = @()
+
+		foreach ($Device in $IntuneDevices) {
+			$DeviceOutputObj = [PsCustomObject]@{
+				type = "intune"
+				id = $Device.id
+				last_active = $null
+			}
+
+			if ($Device.LastSyncDateTime -and [string]$Device.LastSyncDateTime -as [DateTime]) {
+				$DeviceOutputObj.last_active = [DateTime]$Device.LastSyncDateTime
+				$DevicesOutput += $DeviceOutputObj
+			}
+		}
+
+		$DevicesOutput = $DevicesOutput | Sort-Object last_active -Desc
+
+		$DevicesOutput
+		return
+	}
+
+	# Helper function that takes a $MatchedDevices object and returns the activity comparison for SC, RMM, Sophos, and (if applicable) Azure & Intune
 	function compare_activity($MatchedDevice) {
 		$Activity = @{}
 
@@ -1661,6 +2037,16 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		if ($MatchedDevice.sophos_matches -and $MatchedDevice.sophos_matches.count -gt 0) {
 			$SophosActivity = compare_activity_sophos $MatchedDevice.sophos_matches
 			$Activity.sophos = $SophosActivity
+		}
+
+		if ($MatchedDevice.azure_matches -and $MatchedDevice.azure_matches.count -gt 0) {
+			$AzureActivity = compare_activity_azure $MatchedDevice.azure_matches
+			$Activity.azure = $AzureActivity
+		}
+
+		if ($MatchedDevice.intune_matches -and $MatchedDevice.intune_matches.count -gt 0) {
+			$IntuneActivity = compare_activity_intune $MatchedDevice.intune_matches
+			$Activity.intune = $IntuneActivity
 		}
 
 		$Activity
@@ -4178,6 +4564,8 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				$ITGDeviceID = if (($Device.itg_matches | Measure-Object).Count -gt 0) { $Device.itg_matches[0] } else { $false }
 				$AutotaskDeviceID = if (($Device.autotask_matches | Measure-Object).Count -gt 0) { $Device.autotask_matches[0] } else { $false }
 				$JumpCloudDeviceID = if (($Device.jc_matches | Measure-Object).Count -gt 0) { $Device.jc_matches[0] } else { $false }
+				$AzureDeviceID = if ($ActivityComparison.azure) { $ActivityComparison.azure[0].id } else { $false }
+				$IntuneDeviceID = if ($ActivityComparison.intune) { $ActivityComparison.intune[0].id } else { $false }
 
 				$Hostname = $false
 				$SerialNumber = $false
@@ -4199,6 +4587,12 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				$ReplacementYear = $false
 				$SophosTamperKey = $false
 				$SophosTamperStatus = $false
+				$AzureLastSignIn = $false
+				$AzureTrustType = $false
+				$IntuneLastSync = $false
+				$IntuneCompliance = $false
+				$IntuneDeviceOwnerType = $false
+				$IntuneIsEncrypted = $null
 
 				if ($RMMDeviceID) {
 					$RMMDevice = $RMM_DevicesHash[$RMMDeviceID]
@@ -4287,6 +4681,32 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						}
 					}
 					$JCLastContact = $JCLastContact | Sort-Object -Descending | Select-Object -First 1
+					$JCUser = @()
+					if ($JC_Users) {
+						foreach ($JCDevice in $JumpCloudDevice) {
+							$JCUser += $JC_Users | Where-Object { $_.SystemID -eq $JCDevice.id }
+						}
+					}
+				}
+				if ($AzureDeviceID) {
+					$TrustTypes = @{
+						AzureAd = "Azure AD Joined"
+						ServerAd = "Domain Joined"
+						Workplace = "Workplace Joined"
+					}
+					$AzureDevice = $Azure_DevicesHash[$AzureDeviceID]
+					$AzureLastSignIn = [DateTime]$AzureDevice.ApproximateLastSignInDateTime
+					$AzureTrustType = "N/A"
+					if ($AzureDevice.TrustType) {
+						$AzureTrustType = $TrustTypes[$AzureDevice.TrustType]
+					}
+				}
+				if ($IntuneDeviceID) {
+					$IntuneDevice = $Intune_DevicesHash[$IntuneDeviceID]
+					$IntuneLastSync = [DateTime]$IntuneDevice.LastSyncDateTime
+					$IntuneCompliance = $IntuneDevice.ComplianceState
+					$IntuneDeviceOwnerType = $IntuneDevice.ManagedDeviceOwnerType
+					$IntuneIsEncrypted = $IntuneDevice.IsEncrypted
 				}
 				if ($SCDeviceID) {
 					$SCDevice = $SC_DevicesHash[$SCDeviceID]
@@ -4576,6 +4996,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					Location = $Location
 					"Assigned User" = $AssignedUser
 					LastUser = $LastUser
+					"JumpCloud Users" = if (($JCUser | Measure-Object).Count -gt 0) { $JCUser.Username -join ", " } else { "None" }
 					SerialNumber = $SerialNumber
 					Manufacturer = $Manufacturer
 					Model = $Model
@@ -4583,22 +5004,40 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					LastActive = $NewestDate
 					WarrantyExpiry = $WarrantyExpiry
 					Billed = $BilledStr
+					"Azure Trust Type" = if ($AzureTrustType) { $AzureTrustType } else { "NA" }
+					"Intune Compliance" = if ($IntuneCompliance) { $IntuneCompliance } else { "NA" }
+					"Itune Device Owner Type" = if ($IntuneDeviceOwnerType) { $IntuneDeviceOwnerType } else { "NA" }
+					"Is Encrypted (Intune)" = if ($null -ne $IntuneIsEncrypted) { $IntuneIsEncrypted } else { "NA" }
 					InSC = if ($SCDeviceID) { "Yes" } else { "No" }
 					InRMM = if ($RMMDeviceID) { "Yes" } else { "No" }
 					InSophos = if ($SophosDeviceID) { "Yes" } else { "No" }
 					InITG = if ($ITGDeviceID) { "Yes" } else { "No" }
 					InAutotask = if ($AutotaskDeviceID) { "Yes" } else { "No" }
 					InJumpCloud = if ($JumpCloudDeviceID) { if ($JumpCloudDevice.active) { "Yes (Active)" } else { "Yes (Inactive)" } } else { "No" }
+					InAzure = if ($AzureDeviceID) { if ($Device.azure_match_warning) { "Yes (May be inaccurate)" } else { "Yes" } } else { "No" }
+					InIntune = if ($IntuneDeviceID) { "Yes" } else { "No" }
 					SC_Time = if ($ActivityComparison.sc) { $ActivityComparison.sc[0].last_active } else { "NA" }
 					RMM_Time = if ($ActivityComparison.rmm) { $ActivityComparison.rmm[0].last_active } else { "NA" }
 					Sophos_Time = if ($ActivityComparison.sophos) { $ActivityComparison.sophos[0].last_active } else { "NA" }
 					JumpCloud_Time = if ($JCLastContact) { $JCLastContact } else { "NA" }
+					Azure_Time = if ($AzureLastSignIn) { $AzureLastSignIn } else { "NA" }
+					Intune_Time = if ($IntuneLastSync) { $IntuneLastSync } else { "NA" }
 					SophosTamperProtectionKey = $SophosTamperKey
 					SophosTamperStatus = if ($SophosTamperStatus) { "On" } else { "Off" }
 				}
 				if (!$JCConnected) {
 					$DeviceInfo.PSObject.Properties.Remove('InJumpCloud')
 					$DeviceInfo.PSObject.Properties.Remove('JumpCloud_Time')
+					$DeviceInfo.PSObject.Properties.Remove('JumpCloud Users')
+				}
+				if (!$AzureConnected) {
+					$DeviceInfo.PSObject.Properties.Remove('InAzure')
+					$DeviceInfo.PSObject.Properties.Remove('InIntune')
+					$DeviceInfo.PSObject.Properties.Remove('Azure_Time')
+					$DeviceInfo.PSObject.Properties.Remove('Intune_Time')
+					$DeviceInfo.PSObject.Properties.Remove('Azure Trust Type')
+					$DeviceInfo.PSObject.Properties.Remove('Intune Compliance')
+					$DeviceInfo.PSObject.Properties.Remove('Itune Device Owner Type')
 				}
 				$AllDevices += $DeviceInfo
 
@@ -5776,3 +6215,6 @@ if ($companies -contains "ALL" -and ($DeviceCount_Overview | Measure-Object).Cou
 if ($DeviceAuditSpreadsheetsUpdated) {
 	(Get-Date).ToString() | Out-File -FilePath ($MoveOverview.Location + "\lastUpdated.txt")
 }
+
+# Cleanup
+Disconnect-MgGraph

@@ -97,6 +97,18 @@ $ITG_ID = ""
 $Autotask_ID = ""
 
 ####################
+# $Azure_TenantID
+#
+# The TenantID of the company in Azure.
+# This is used to connect Azure and Intune to the device audit.
+# This only applicable if you have partner access to this tenant.
+# You can use the ViewAzureTenants.ps1 script to get a full list of tenants and their ID's connected to your partner portal.
+#
+# Example: "aefc47c2-cf0f-6e9e-be1d-beaf5b3f2a48"
+#
+$Azure_TenantID = ""
+
+####################
 # $JumpCloudAPIKey
 #
 # Your JumpCloud API key
