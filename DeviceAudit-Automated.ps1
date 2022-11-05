@@ -1,4 +1,7 @@
-param($companies = @())
+param(
+	$companies = @(),
+	$ForceMonthlyUsageRollup = $false
+)
 #####################################################################
 ### Run this with a single argument
 ### The argument should either be the company's acronym (referencing a config file)
@@ -3043,6 +3046,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	$DeviceLocationsUpdateRan = $false
 	$MonthlyStatsUpdated = $false
 	$DeviceBillingUpdateRan = $false
+	$DeviceUsersUpdateRan = $false
 	$ITGLocations = $false 
 
 	# Check for devices that haven't been seen in a long time (in $InactiveDeleteDays) and suggest they be deleted
@@ -3689,8 +3693,9 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		$LastMonth = (Get-Date).AddMonths(-1)
 		$LastDay = [DateTime]::DaysInMonth($LastMonth.Year, $LastMonth.Month)
 		$CheckDate = [DateTime]::new($LastMonth.Year, $LastMonth.Month, $LastDay, 23, 59, 59)
-		$MonthlyStatsUpdated = $false
-		if (!$StatsLastUpdated -or ($StatsLastUpdated -and (Get-Date $StatsLastUpdated.LastUpdated) -lt $CheckDate)) {
+		$Updated_ComputerUsage = @()
+		$Updated_UserUsage = @()
+		if (!$StatsLastUpdated -or ($StatsLastUpdated -and (Get-Date $StatsLastUpdated.LastUpdated) -lt $CheckDate) -or $ForceMonthlyUsageRollup) {
 			# Get all usage documents
 			$Year_Month = Get-Date (Get-Date).AddMonths(-1) -Format 'yyyy-MM'
 			$Usage = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Usage" -Query "SELECT * FROM Usage AS u WHERE u.yearmonth = '$Year_Month'" -PartitionKey $Year_Month
@@ -3715,7 +3720,6 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				$Monthly_OutOfDays = ($Usage | Select-Object @{Name="Day"; E={ Get-Date $_.UseDateTime -Format 'dd' }} | Select-Object -ExpandProperty Day | Sort-Object -Unique | Measure-Object).Count
 	
 				# Build the monthly stats for each computer
-				$Updated_ComputerUsage = @()
 				foreach ($ComputerID in $ComputerIDs) {
 					$ExistingEntry = $Existing_ComputerUsage | Where-Object { $_.id -eq $ComputerID }
 	
@@ -3740,19 +3744,30 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					$DaysActive = ($MonthsUsage.Group | Select-Object Day | Select-Object -ExpandProperty Day | Sort-Object -Unique | Measure-Object).Count
 					$DaysActivePercent = [Math]::Round($DaysActive / $Monthly_OutOfDays * 100)
 	
-					$New_UsageHistory.DaysActive.Total += $DaysActive
 					$New_UsageHistory.DaysActive.LastMonth = $DaysActive
 					$New_UsageHistory.DaysActive.LastMonthPercent = $DaysActivePercent
 					if ($New_UsageHistory.DaysActive.History -is 'PSCustomObject') {
-						$New_UsageHistory.DaysActive.History | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
-						$New_UsageHistory.DaysActive.HistoryPercent | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
+						if (!$New_UsageHistory.DaysActive.History.$Year_Month) {
+							$New_UsageHistory.DaysActive.History | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
+						}
+						if (!$New_UsageHistory.DaysActive.HistoryPercent.$Year_Month) {
+							$New_UsageHistory.DaysActive.HistoryPercent | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
+						}
 						$New_UsageHistory.DaysActive.History.$Year_Month = $DaysActive
 						$New_UsageHistory.DaysActive.HistoryPercent.$Year_Month = $DaysActivePercent
 					} else {
 						$New_UsageHistory.DaysActive.History[$Year_Month] = $DaysActive
 						$New_UsageHistory.DaysActive.HistoryPercent[$Year_Month] = $DaysActivePercent
 					}
-					$New_UsageHistory.LastActive = ($MonthsUsage.Group | Sort-Object { $_.UseDateTime -as [DateTime] } -Descending | Select-Object -First 1).UseDateTime
+					$LastActive = ($MonthsUsage.Group | Sort-Object { $_.UseDateTime -as [DateTime] } -Descending | Select-Object -First 1).UseDateTime
+					if (!$New_UsageHistory.LastActive -or $LastActive -gt $New_UsageHistory.LastActive) {
+						$New_UsageHistory.LastActive = $LastActive
+					}
+					if ($ExistingEntry) {
+						$New_UsageHistory.DaysActive.Total = (($ExistingEntry.DaysActive.History.PSObject.Properties.Value | Measure-Object -Sum).Sum)
+					} else {
+						$New_UsageHistory.DaysActive.Total += $DaysActive
+					}
 					$New_UsageHistory.UsersUsedBy | Foreach-Object {
 						$_.DaysActive.LastMonth = 0
 						$_.DaysActive.LastMonthPercent = 0
@@ -3768,19 +3783,30 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	
 						$ExistingIndex = $Existing_UsersUsedBy.FindIndex( {$args[0].id -eq $UserID } )
 						if ($ExistingIndex -ge 0) {
-							$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.Total += $DaysActive
 							$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.LastMonth = $DaysActive
 							$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.LastMonthPercent = $DaysActivePercent
 							if ($New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.History -is 'PSCustomObject') {
-								$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.History | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
-								$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.HistoryPercent | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
+								if (!$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.History.$Year_Month) {
+									$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.History | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
+								}
+								if (!$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.HistoryPercent.$Year_Month) {
+									$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.HistoryPercent | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
+								}
 								$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.History.$Year_Month = $DaysActive
 								$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.HistoryPercent.$Year_Month = $DaysActivePercent
 							} else {
 								$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.History[$Year_Month] = $DaysActive
 								$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.HistoryPercent[$Year_Month] = $DaysActivePercent
 							}
-							$New_UsageHistory.UsersUsedBy[$ExistingIndex].LastActive = ($MonthsUsageByUser.Group | Sort-Object { $_.UseDateTime -as [DateTime] } -Descending | Select-Object -First 1).UseDateTime
+							$LastActive = ($MonthsUsageByUser.Group | Sort-Object { $_.UseDateTime -as [DateTime] } -Descending | Select-Object -First 1).UseDateTime
+							if (!$New_UsageHistory.UsersUsedBy[$ExistingIndex].LastActive -or $LastActive -gt $New_UsageHistory.UsersUsedBy[$ExistingIndex].LastActive) {
+								$New_UsageHistory.UsersUsedBy[$ExistingIndex].LastActive = $LastActive
+							}
+							if ($New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.History) {
+								$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.Total = (($New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.History.PSObject.Properties.Value | Measure-Object -Sum).Sum)
+							} else {
+								$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.Total += $DaysActive
+							}
 						} else {
 							$New_UsageHistory.UsersUsedBy += @{
 								id = $UserID
@@ -3815,7 +3841,6 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				}
 	
 				# Build the monthly stats for each user
-				$Updated_UserUsage = @()
 				foreach ($UserID in $UserIDs) {
 					$ExistingEntry = $Existing_UserUsage | Where-Object { $_.id -eq $UserID }
 	
@@ -3840,19 +3865,30 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					$DaysActive = ($MonthsUsage.Group | Select-Object Day | Select-Object -ExpandProperty Day | Sort-Object -Unique | Measure-Object).Count
 					$DaysActivePercent = [Math]::Round($DaysActive / $Monthly_OutOfDays * 100)
 	
-					$New_UsageHistory.DaysActive.Total += $DaysActive
 					$New_UsageHistory.DaysActive.LastMonth = $DaysActive
 					$New_UsageHistory.DaysActive.LastMonthPercent = $DaysActivePercent
 					if ($New_UsageHistory.DaysActive.History -is 'PSCustomObject') {
-						$New_UsageHistory.DaysActive.History | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
-						$New_UsageHistory.DaysActive.HistoryPercent | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
+						if (!$New_UsageHistory.DaysActive.History.$Year_Month) {
+							$New_UsageHistory.DaysActive.History | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
+						}
+						if (!$New_UsageHistory.DaysActive.HistoryPercent.$Year_Month) {
+							$New_UsageHistory.DaysActive.HistoryPercent | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
+						}
 						$New_UsageHistory.DaysActive.History.$Year_Month = $DaysActive
 						$New_UsageHistory.DaysActive.HistoryPercent.$Year_Month = $DaysActivePercent
 					} else {
 						$New_UsageHistory.DaysActive.History[$Year_Month] = $DaysActive
 						$New_UsageHistory.DaysActive.HistoryPercent[$Year_Month] = $DaysActivePercent
 					}
-					$New_UsageHistory.LastActive = ($MonthsUsage.Group | Sort-Object { $_.UseDateTime -as [DateTime] } -Descending | Select-Object -First 1).UseDateTime
+					$LastActive = ($MonthsUsage.Group | Sort-Object { $_.UseDateTime -as [DateTime] } -Descending | Select-Object -First 1).UseDateTime
+					if (!$New_UsageHistory.LastActive -or $LastActive -gt $New_UsageHistory.LastActive) {
+						$New_UsageHistory.LastActive = $LastActive
+					}
+					if ($ExistingEntry) {
+						$New_UsageHistory.DaysActive.Total = (($ExistingEntry.DaysActive.History.PSObject.Properties.Value | Measure-Object -Sum).Sum)
+					} else {
+						$New_UsageHistory.DaysActive.Total += $DaysActive
+					}
 					$New_UsageHistory.ComputersUsed | Foreach-Object {
 						$_.DaysActive.LastMonth = 0
 						$_.DaysActive.LastMonthPercent = 0
@@ -3868,19 +3904,30 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	
 						$ExistingIndex = $Existing_ComputersUsed.FindIndex( {$args[0].id -eq $ComputerID } )
 						if ($ExistingIndex -ge 0) {
-							$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.Total += $DaysActive
 							$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.LastMonth = $DaysActive
 							$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.LastMonthPercent = $DaysActivePercent
 							if ($New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.History -is 'PSCustomObject') {
-								$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.History | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
-								$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.HistoryPercent | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
+								if (!$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.History.$Year_Month) {
+									$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.History | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
+								}
+								if (!$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.HistoryPercent.$Year_Month) {
+									$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.HistoryPercent | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
+								}
 								$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.History.$Year_Month = $DaysActive
 								$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.HistoryPercent.$Year_Month = $DaysActivePercent
 							} else {
 								$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.History[$Year_Month] = $DaysActive
 								$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.HistoryPercent[$Year_Month] = $DaysActivePercent
 							}
-							$New_UsageHistory.ComputersUsed[$ExistingIndex].LastActive = ($MonthsUsageByComputer.Group | Sort-Object { $_.UseDateTime -as [DateTime] } -Descending | Select-Object -First 1).UseDateTime
+							$LastActive = ($MonthsUsageByComputer.Group | Sort-Object { $_.UseDateTime -as [DateTime] } -Descending | Select-Object -First 1).UseDateTime
+							if (!$New_UsageHistory.ComputersUsed[$ExistingIndex].LastActive -or $LastActive -gt $New_UsageHistory.ComputersUsed[$ExistingIndex].LastActive) {
+								$New_UsageHistory.ComputersUsed[$ExistingIndex].LastActive = $LastActive
+							}
+							if ($New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.History) {
+								$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.Total = (($New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.History.PSObject.Properties.Value | Measure-Object -Sum).Sum)
+							} else {
+								$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.Total += $DaysActive
+							}
 						} else {
 							$New_UsageHistory.ComputersUsed += @{
 								id = $ComputerID
@@ -4153,6 +4200,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 										RecentUsers = @($DBUser.ITG_ID)
 									}
 								}
+								$DeviceUsersUpdateRan = $true
 							}
 						}
 					}
@@ -4374,6 +4422,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					New-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Variables" -DocumentBody ($StatsUpdated | ConvertTo-Json) -PartitionKey 'ComputerUsersLastUpdated' | Out-Null
 				}
 				$LastUpdated = Get-Date
+				$DeviceUsersUpdateRan = $true
 			}
 
 			# Export an updated json file of device users
@@ -6176,6 +6225,9 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		}
 		if ($MonthlyStatsUpdated) {
 			$Body.Add("monthly-stats-rollup", (Get-Date).ToString("yyyy-MM-dd"))
+		}
+		if ($DeviceUsersUpdateRan) {
+			$Body.Add("device-users", (Get-Date).ToString("yyyy-MM-dd"))
 		}
 
 		$Params = @{
