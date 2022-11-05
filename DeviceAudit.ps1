@@ -3892,6 +3892,27 @@ if ($DOBillingExport) {
 					$LastUser = "$($LastUser) (Local)"
 				}
 			}
+			if ($ITGDeviceID) {
+				$ITGDevice = $ITG_DevicesHash[$ITGDeviceID]
+				if (!$Location) {
+					$Location = $ITGDevice.attributes."location-name"
+				}
+				if (!$AssignedUser) {
+					$AssignedUser = $ITGDevice.attributes."contact-name"
+				}
+				if (!$SerialNumber) {
+					$SerialNumber = $ITGDevice.attributes.'serial-number'
+				}
+				if (!$DeviceType) {
+					$DeviceType = $ITGDevice.attributes."configuration-type-name"
+				}
+				if (!$WarrantyExpiry) {
+					$WarrantyExpiry = $ITGDevice.attributes.'warranty-expires-at'
+				}
+				if (!$WarrantyStart) {
+					$WarrantyStart = $ITGDevice.attributes.'purchased-at'
+				}
+			}
 			if ($AutotaskDeviceID) {
 				$AutotaskDevice = $Autotask_DevicesHash[$AutotaskDeviceID]
 				if ($AutotaskDevice) {
@@ -3926,27 +3947,6 @@ if ($DOBillingExport) {
 						$WarrantyExpiry = $AutotaskDevice.warrantyExpirationDate
 					}
 					$WarrantyStart = ($AutotaskDevice.userDefinedFields | Where-Object { $_.name -eq "Warranty Start Date" }).value
-				}
-			}
-			if ($ITGDeviceID) {
-				$ITGDevice = $ITG_DevicesHash[$ITGDeviceID]
-				if (!$Location) {
-					$Location = $ITGDevice.attributes."location-name"
-				}
-				if (!$AssignedUser) {
-					$AssignedUser = $ITGDevice.attributes."contact-name"
-				}
-				if (!$SerialNumber) {
-					$SerialNumber = $ITGDevice.attributes.'serial-number'
-				}
-				if (!$DeviceType) {
-					$DeviceType = $ITGDevice.attributes."configuration-type-name"
-				}
-				if (!$WarrantyExpiry) {
-					$WarrantyExpiry = $ITGDevice.attributes.'warranty-expires-at'
-				}
-				if (!$WarrantyStart) {
-					$WarrantyStart = $ITGDevice.attributes.'purchased-at'
 				}
 			}
 			if ($JumpCloudDeviceID) {
@@ -4484,7 +4484,7 @@ if ($DOBillingExport) {
 }
 
 # Update device locations in Autotask/IT Glue
-if ($DOUpdateDeviceLocations -and $ITGConnected -and $AutotaskConnected -and $ITG_ID -and $Autotask_ID) {
+if ($DOUpdateDeviceLocations -and $ITGConnected -and $ITG_ID) {
 	Write-Host "Updating device locations..."
 	$WANs = Get-ITGlueFlexibleAssets -page_size 1000 -filter_flexible_asset_type_id $WANFilterID.id -filter_organization_id $ITG_ID
 	$LANs = Get-ITGlueFlexibleAssets -page_size 1000 -filter_flexible_asset_type_id $LANFilterID.id -filter_organization_id $ITG_ID
@@ -4502,7 +4502,7 @@ if ($DOUpdateDeviceLocations -and $ITGConnected -and $AutotaskConnected -and $IT
 		$LANs = $LANs.data
 	}
 
-	if ($WANs -and $WANs.data -and ($WANs.data | Measure-Object).Count -gt 0 -and $ITG_Devices -and $ITGLocations -and $Autotask_Locations) {
+	if ($WANs -and $WANs.data -and ($WANs.data | Measure-Object).Count -gt 0 -and $ITG_Devices -and $ITGLocations) {
 		$WANs = $WANs.data
 
 		$LocationIPs = @()
@@ -4529,7 +4529,14 @@ if ($DOUpdateDeviceLocations -and $ITGConnected -and $AutotaskConnected -and $IT
 				# Parse the html on the WAN page
 				if ($IPAddressInfo -like "*<table>*") {
 					$HTML = New-Object -Com "HTMLFile"
-					$HTML.IHTMLDocument2_write($IPAddressInfo)
+					try {
+						# This works in PowerShell with Office installed
+						$HTML.IHTMLDocument2_write($IPAddressInfo)
+					} catch {
+						# This works when Office is not installed    
+						$src = [System.Text.Encoding]::Unicode.GetBytes($IPAddressInfo)
+						$HTML.write($src)
+					}
 	
 					$TableData = $HTML.all | Where-Object { $_.tagname -eq 'td' }
 					$TableHeaders = $TableData | Where-Object { $_.innerHtml -like "*<strong>*</strong>*" }
@@ -4619,15 +4626,18 @@ if ($DOUpdateDeviceLocations -and $ITGConnected -and $AutotaskConnected -and $IT
 				continue
 			}
 			
-			$AutotaskLocation = $Autotask_Locations | Where-Object { $_.name -like $Location.attributes.name }
-			if (!$AutotaskLocation) {
-				$AutotaskLocation = $Autotask_Locations | Where-Object {
-					$_.address1 -like $Location.attributes.'address-1' -and
-					$_.address2 -like $Location.attributes.'address-2' -and
-					$_.city -like $Location.attributes.city -and
-					$_.postalCode -like $Location.attributes.'postal-code' -and
-					$_.state -like $Location.attributes.'region-name' -and
-					($_.phone -replace "[^0-9]") -like $Location.attributes.phone
+			$AutotaskLocation = $false
+			if ($AutotaskConnected -and $Autotask_Locations) {
+				$AutotaskLocation = $Autotask_Locations | Where-Object { $_.name -like $Location.attributes.name }
+				if (!$AutotaskLocation) {
+					$AutotaskLocation = $Autotask_Locations | Where-Object {
+						$_.address1 -like $Location.attributes.'address-1' -and
+						$_.address2 -like $Location.attributes.'address-2' -and
+						$_.city -like $Location.attributes.city -and
+						$_.postalCode -like $Location.attributes.'postal-code' -and
+						$_.state -like $Location.attributes.'region-name' -and
+						($_.phone -replace "[^0-9]") -like $Location.attributes.phone
+					}
 				}
 			}
 
@@ -4635,7 +4645,7 @@ if ($DOUpdateDeviceLocations -and $ITGConnected -and $AutotaskConnected -and $IT
 				ExternalIPs = $IPs_Parsed
 				InternalIPs = $InternalIPs
 				ITGLocation = $Location.id
-				AutotaskLocation = $AutotaskLocation.id
+				AutotaskLocation = if ($AutotaskLocation) { $AutotaskLocation.id } else { $false }
 				WANs = @($LocationWANs.id)
 				LANs = @($ValidLANs)
 			}
@@ -4672,6 +4682,7 @@ if ($DOUpdateDeviceLocations -and $ITGConnected -and $AutotaskConnected -and $IT
 				}
 
 				$RMMDevice = @()
+				$ExternalIP = $false
 				foreach ($DeviceID in $MatchedDevice.rmm_matches) {
 					$RMMDevice += $RMM_DevicesHash[$DeviceID]
 				}
@@ -4683,8 +4694,10 @@ if ($DOUpdateDeviceLocations -and $ITGConnected -and $AutotaskConnected -and $IT
 					foreach ($DeviceID in $MatchedDevice.autotask_matches) {
 						$AutotaskDevice += $Autotask_DevicesHash[$DeviceID]
 					}
-					$ExternalIP = @($AutotaskDevice.rmmDeviceAuditExternalIPAddress)
-					$InternalIP = @($AutotaskDevice.rmmDeviceAuditIPAddress)
+					if ($AutotaskDevice) {
+						$ExternalIP = @($AutotaskDevice.rmmDeviceAuditExternalIPAddress)
+						$InternalIP = @($AutotaskDevice.rmmDeviceAuditIPAddress)
+					}
 				}
 
 				if (!$ExternalIP) {
@@ -4709,7 +4722,7 @@ if ($DOUpdateDeviceLocations -and $ITGConnected -and $AutotaskConnected -and $IT
 					}
 				}
 
-				$PossibleLocations = $PossibleLocations | Where-Object { $_.AutotaskLocation }
+				$PossibleLocations = $PossibleLocations | Where-Object { $_.AutotaskLocation -or $_.ITGLocation }
 
 				if (!$PossibleLocations) {
 					continue
@@ -4720,7 +4733,7 @@ if ($DOUpdateDeviceLocations -and $ITGConnected -and $AutotaskConnected -and $IT
 					$ITGMatch = $ITG_DevicesHash[$ITG_DeviceID]
 
 					# If currently set location is in $PossibleLocations, use existing location
-					if ($ITGMatch.attributes.'location-id' -and $ITGMatch.attributes.'location-id' -in $PossibleLocations.Location) {
+					if ($ITGMatch.attributes.'location-id' -and $ITGMatch.attributes.'location-id' -in $PossibleLocations.ITGLocation) {
 						$ExistingLocation = $PossibleLocations | Where-Object { $ITGMatch.'location-id' -in $_.Location } | Select-Object -First 1
 						if ($ExistingLocation.WANs) {
 							foreach ($WAN_ID in $ExistingLocation.WANs) {
@@ -4749,24 +4762,52 @@ if ($DOUpdateDeviceLocations -and $ITGConnected -and $AutotaskConnected -and $IT
 					}
 				}
 
-				foreach ($Autotask_DeviceID in $MatchedDevice.autotask_matches) {
-					$AutotaskMatch = $Autotask_DevicesHash[$Autotask_DeviceID]
+				# Update locations in Autotask
+				if ($AutotaskConnected -and $Autotask_Locations) {
+					foreach ($Autotask_DeviceID in $MatchedDevice.autotask_matches) {
+						$AutotaskMatch = $Autotask_DevicesHash[$Autotask_DeviceID]
+						# If currently set location is in $PossibleLocations, dont update
+						if ($AutotaskMatch.companyLocationID -in $PossibleLocations.AutotaskLocation) {
+							continue
+						}
+
+						# Update location
+						Write-Progress -Activity "Updating Device Locations" -PercentComplete $PercentComplete -Status ("Working - " + $PercentComplete + "% (Updating in Autotask: $Hostname)")
+						$NewLocation = $PossibleLocations | Select-Object -First 1 # if multiple, just use the first
+
+						$ConfigurationUpdate = 
+						[PSCustomObject]@{
+							companyLocationID = $NewLocation.AutotaskLocation
+						}
+
+						Set-AutotaskAPIResource -Resource ConfigurationItems -ID $Autotask_DeviceID -body $ConfigurationUpdate | Out-Null
+					}
+				}
+
+				# Update Locations in ITG
+				foreach ($ITG_DeviceID in $MatchedDevice.itg_matches) {
+					$ITGMatch = $ITG_DevicesHash[$ITG_DeviceID]
 					# If currently set location is in $PossibleLocations, dont update
-					if ($AutotaskMatch.companyLocationID -in $PossibleLocations.AutotaskLocation) {
+					if ($ITGMatch.attributes.'location-id' -in $PossibleLocations.ITGLocation) {
+						continue
+					}
+					# If the device is synced with autotask then we cannot update ITG directly, instead this will sync down from Autotask which we updated above
+					if ($ITGMatch.attributes.'psa-integration' -and $ITGMatch.attributes.'psa-integration' -ne 'disabled') {
 						continue
 					}
 
 					# Update location
-					Write-Progress -Activity "Updating Device Locations" -PercentComplete $PercentComplete -Status ("Working - " + $PercentComplete + "% (Updating: $Hostname)")
+					Write-Progress -Activity "Updating Device Locations" -PercentComplete $PercentComplete -Status ("Working - " + $PercentComplete + "% (Updating in ITG: $Hostname)")
 					$NewLocation = $PossibleLocations | Select-Object -First 1 # if multiple, just use the first
 
-					$ConfigurationUpdate = 
-					[PSCustomObject]@{
-						id = $Autotask_DeviceID
-						companyLocationID = $NewLocation.AutotaskLocation
+					$ConfigurationUpdate = @{
+						'type' = 'configurations'
+						'attributes' = @{
+							'location-id' = $NewLocation.ITGLocation
+						}
 					}
 
-					Set-AutotaskAPIResource -Resource ConfigurationItems -ID $Autotask_DeviceID -body $ConfigurationUpdate | Out-Null
+					Set-ITGlueConfigurations -id $ITG_DeviceID -data $ConfigurationUpdate | Out-Null
 				}
 			}
 			Write-Progress -Activity "Updating Device Locations" -Status "Ready" -Completed
