@@ -170,7 +170,14 @@ if ($RMM_ID) {
 # Get all devices from ITG
 $ITG_Devices = @()
 if ($ITGConnected -and $ITG_ID) {
-	$ITG_Devices = Get-ITGlueConfigurations -page_size 10000 -organization_id $ITG_ID
+	$ITG_Devices = Get-ITGlueConfigurations -page_size "1000" -organization_id $ITG_ID
+	$i = 1
+	while ($ITG_Devices.links.next) {
+		$i++
+		$Configurations_Next = Get-ITGlueConfigurations -page_size "1000" -page_number $i -organization_id $ITG_ID
+		$ITG_Devices.data += $Configurations_Next.data
+		$ITG_Devices.links = $Configurations_Next.links
+	}
 	if ($ITG_Devices -and $ITG_Devices.data) {
 		$ITG_Devices = $ITG_Devices.data
 	}
