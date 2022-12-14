@@ -4920,10 +4920,12 @@ if ($DOUpdateDeviceLocations -and $ITGConnected -and $ITG_ID) {
 							continue
 						}
 
+						$Device.LastSeen = $Device.LastSeen -as [DateTime];
+
 						$Row = [PSCustomObject]@{
 							'DeviceName' = $Hostname
 							'Device' = $HostnameAndURL
-							'Last Seen' = $Device.LastSeen.ToLocalTime()
+							'Last Seen' = if ($Device.LastSeen) { $Device.LastSeen.ToLocalTime() } else { $false }
 						}
 						$DeviceHistoryTable += $Row
 
@@ -5132,10 +5134,12 @@ if ($DOUpdateDeviceLocations -and $ITGConnected -and $ITG_ID) {
 							continue
 						}
 
+						$Device.LastSeen = $Device.LastSeen -as [DateTime];
+
 						$Row = [PSCustomObject]@{
 							'DeviceName' = $Hostname
 							'Device' = $HostnameAndURL
-							'Last Seen' = $Device.LastSeen.ToLocalTime()
+							'Last Seen' = if ($Device.LastSeen) { $Device.LastSeen.ToLocalTime() } else { $false }
 						}
 						$DeviceHistoryTable += $Row
 

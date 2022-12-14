@@ -5900,10 +5900,12 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 								continue
 							}
 
+							$Device.LastSeen = $Device.LastSeen -as [DateTime];
+
 							$Row = [PSCustomObject]@{
 								'DeviceName' = $Hostname
 								'Device' = $HostnameAndURL
-								'Last Seen' = $Device.LastSeen.ToLocalTime()
+								'Last Seen' = if ($Device.LastSeen) { $Device.LastSeen.ToLocalTime() } else { $false }
 							}
 							$DeviceHistoryTable += $Row
 
@@ -6112,10 +6114,12 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 								continue
 							}
 
+							$Device.LastSeen = $Device.LastSeen -as [DateTime];
+
 							$Row = [PSCustomObject]@{
 								'DeviceName' = $Hostname
 								'Device' = $HostnameAndURL
-								'Last Seen' = $Device.LastSeen.ToLocalTime()
+								'Last Seen' = if ($Device.LastSeen) { $Device.LastSeen.ToLocalTime() } else { $false }
 							}
 							$DeviceHistoryTable += $Row
 
