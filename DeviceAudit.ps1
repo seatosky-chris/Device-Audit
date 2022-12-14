@@ -1971,6 +1971,25 @@ function archive_itg($ITG_Device_ID) {
 	}
 }
 
+# Cleans up the name of a Manufacturer
+function manufacturer_cleanup($Manufacturer) {
+	if ($Manufacturer) {
+		$CleanedManufacturer = $Manufacturer
+		if ($CleanedManufacturer -like "*/*") {
+			$CleanedManufacturer = ($CleanedManufacturer -split '/')[0]
+		}
+		$CleanedManufacturer = $CleanedManufacturer.Trim()
+		$CleanedManufacturer = $CleanedManufacturer -replace ",? ?(Inc\.?$|Corporation$|Corp\.?$|Co\.$|Ltd\.?$)", ""
+		$CleanedManufacturer = $CleanedManufacturer.Trim()
+		$CleanedManufacturer = $CleanedManufacturer -replace ",? ?(Inc\.?$|Corporation$|Corp\.?$|Co\.$|Ltd\.?$)", ""
+		$CleanedManufacturer = $CleanedManufacturer.Trim()
+
+		return $CleanedManufacturer
+	} else {
+		return $null
+	}
+}
+
 # Levenshtein distance function for comparing similarity between two strings
 function Measure-StringDistance {
     <#
@@ -3162,12 +3181,7 @@ if ($DOUsageDBSave) {
 
 			# cleanup data to be more readable
 			if ($Manufacturer) {
-				if ($Manufacturer -like "*/*") {
-					$Manufacturer = ($Manufacturer -split '/')[0]
-				}
-				$Manufacturer = $Manufacturer.Trim()
-				$Manufacturer = $Manufacturer -replace ",? ?(Inc\.?$|Corporation$|Corp\.?$|Ltd\.?$)", ""
-				$Manufacturer = $Manufacturer.Trim()
+				$Manufacturer = manufacturer_cleanup -Manufacturer $Manufacturer
 			}
 
 			if ($OperatingSystem) {
