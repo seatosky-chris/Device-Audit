@@ -67,36 +67,46 @@ if ($CPUDataLocation -and (Test-Path -Path ($CPUDataLocation + "\cpu_matching.js
 
 if ($CPUDataLastUpdated -and $CPUDataLastUpdated.AddDays(14) -lt (Get-Date)) {
 	$NewCPUList = [System.Collections.ArrayList]@()
+	$UpdateSuccessful = $true
 	$headers=@{}
 	$headers.Add("X-RapidAPI-Host", $RapidAPI_Creds.Host)
 	$headers.Add("X-RapidAPI-Key", $RapidAPI_Creds.Key)
 
 	foreach ($CPUName in $CPUNameSearch) {
-		$response = Invoke-RestMethod -Uri "https://$($RapidAPI_Creds.Host)/cpus/search/?name=$($CPUName)" -Method GET -Headers $headers
+		try {
+			$response = Invoke-RestMethod -Uri "https://$($RapidAPI_Creds.Host)/cpus/search/?name=$($CPUName)" -Method GET -Headers $headers
+		} catch {
+			if ($_.Exception.Response.StatusCode.value__ -eq 503) {
+				$UpdateSuccessful = $false
+				break;
+			}
+		}
 		$response | Foreach-Object { $NewCPUList.Add($_) } | Out-Null
 		Start-Sleep -Seconds 2 # we are rate limited to 1 call per second
 	}
 
-	(Get-Date).ToString() | Out-File -FilePath ($CPUDataLocation + "\lastUpdated.txt")
+	if ($UpdateSuccessful -or ($NewCPUList | Measure-Object).Count -gt 0) {
+		(Get-Date).ToString() | Out-File -FilePath ($CPUDataLocation + "\lastUpdated.txt")
 
-	if ($CPUDetails -and $CPUDetails.ID) {
-		$CPUDetails = [System.Collections.ArrayList]@($CPUDetails)
-		foreach ($NewCPU in $NewCPUList) {
-			if ($NewCPU.ID -in $CPUDetails.ID) {
-				$OldCPUEntry = $CPUDetails | Where-Object { $_.ID -eq $NewCPU.ID }
-				if ($OldCPUEntry.CPUMark -ne $NewCPU.CPUMark) {
-					($CPUDetails | Where-Object { $_.ID -eq $NewCPU.ID }).CPUMark = $NewCPU.CPUMark
+		if ($CPUDetails -and $CPUDetails.ID) {
+			$CPUDetails = [System.Collections.ArrayList]@($CPUDetails)
+			foreach ($NewCPU in $NewCPUList) {
+				if ($NewCPU.ID -in $CPUDetails.ID) {
+					$OldCPUEntry = $CPUDetails | Where-Object { $_.ID -eq $NewCPU.ID }
+					if ($OldCPUEntry.CPUMark -ne $NewCPU.CPUMark) {
+						($CPUDetails | Where-Object { $_.ID -eq $NewCPU.ID }).CPUMark = $NewCPU.CPUMark
+					}
+				} else {
+					$CPUDetails.Add($NewCPU) 
 				}
-			} else {
-				$CPUDetails.Add($NewCPU) 
 			}
+		} else {
+			$CPUDetails = $NewCPUList
 		}
-	} else {
-		$CPUDetails = $NewCPUList
-	}
 
-	$CPUDetails = $CPUDetails | Sort-Object -Unique -Property ID
-	$CPUDetails | ConvertTo-Json | Out-File -FilePath ($CPUDataLocation + "\cpus.json")
+		$CPUDetails = $CPUDetails | Sort-Object -Unique -Property ID
+		$CPUDetails | ConvertTo-Json | Out-File -FilePath ($CPUDataLocation + "\cpus.json")
+	}
 }
 
 $CPUDetailsHash = @{}
