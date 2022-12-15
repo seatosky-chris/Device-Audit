@@ -3712,6 +3712,7 @@ if ($Sophos_Company -and $Sophos_Devices -and $SophosTenantID -and $TenantApiHos
 		$i = 0
 		$SophosFailedSleepTime = 0
 		$MaxFailTime = 180000 # 3 minutes
+		$FailsInARow = 0
 		:foreachSophosDevice foreach ($Device in $Sophos_Devices) {
 			$i++
 			[int]$PercentComplete = ($i / $SophosDeviceCount * 100)
@@ -3719,11 +3720,24 @@ if ($Sophos_Company -and $Sophos_Devices -and $SophosTenantID -and $TenantApiHos
 
 			# Refresh token if it has expired
 			if ($SophosToken.expiry -lt (Get-Date)) {
-				$SophosToken = Invoke-RestMethod -Method POST -Body $SophosGetTokenBody -ContentType "application/x-www-form-urlencoded" -uri "https://id.sophos.com/api/v2/oauth2/token"
-				$SophosJWT = $SophosToken.access_token
-				$SophosToken | Add-Member -NotePropertyName expiry -NotePropertyValue $null
-				$SophosToken.expiry = (Get-Date).AddSeconds($SophosToken.expires_in)
+				try {
+					$SophosToken = Invoke-RestMethod -Method POST -Body $SophosGetTokenBody -ContentType "application/x-www-form-urlencoded" -uri "https://id.sophos.com/api/v2/oauth2/token"
+					$SophosJWT = $SophosToken.access_token
+					$SophosToken | Add-Member -NotePropertyName expiry -NotePropertyValue $null
+					$SophosToken.expiry = (Get-Date).AddSeconds($SophosToken.expires_in)
+				} catch {
+					$SophosToken = $false
+				}
 			}
+
+			if (!$SophosToken) {
+				$FailsInARow++
+				if ($FailsInARow -gt 10) {
+					break
+				}
+				continue;
+			}
+			$FailsInARow = 0
 
 			$SophosHeader = @{
 				Authorization = "Bearer $SophosJWT"
