@@ -5525,7 +5525,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				if ($LocationLANs) {
 					$LocationWANs += $WANs | Where-Object { $_.id -in $LocationLANs.attributes.traits.'internet-wan'.values.id }	
 				}
-				$LocationWANs = $LocationWANs | Sort-Object -Unique
+				$LocationWANs = $LocationWANs | Sort-Object | Get-Unique -AsString
 
 				if (!$LocationWANs) {
 					continue
