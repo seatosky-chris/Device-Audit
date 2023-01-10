@@ -2466,6 +2466,12 @@ if ($DOBrokenConnectionSearch) {
 					} elseif ($DeviceType -eq 'sophos') {
 						$SophosDevice = $Sophos_DevicesHash[$DeviceID]
 						$Hostname = $SophosDevice.hostname
+					} elseif ($DeviceType -eq 'azure') {
+						$AzureDevice = $Azure_DevicesHash[$DeviceID]
+						$Hostname = $AzureDevice.DisplayName
+					} elseif ($DeviceType -eq 'intune') {
+						$InTuneDevice = $InTune_DevicesHash[$DeviceID]
+						$Hostname = $InTuneDevice.DeviceName
 					}
 
 					$Link = ''
@@ -2477,8 +2483,10 @@ if ($DOBrokenConnectionSearch) {
 						} else {
 							$Link = "https://$($DattoAPIKey.Region).centrastage.net/csm/search?qs=uid%3A$($DeviceID)"
 						}
-					} else {
+					} elseif ($DeviceType -eq 'sophos') {
 						$Link = "https://cloud.sophos.com/manage/devices/computers/$($SophosDevice.webID)"
+					} else {
+						$Link = ""
 					}
 
 					# See if we can try to automatically fix this issue
