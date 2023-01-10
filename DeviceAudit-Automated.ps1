@@ -2186,6 +2186,17 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		}
 	}
 
+	# Converts a subnet mask into a Cidr range
+	function Convert-SubnetMaskToCidr($Subnet) {
+		# From: https://codeandkeep.com/PowerShell-Get-Subnet-NetworkID/
+		$NetMaskIP = [IPAddress]$Subnet
+		$BinaryString = [String]::Empty
+		$NetMaskIP.GetAddressBytes() | ForEach-Object {
+			$BinaryString += [Convert]::ToString($_, 2)
+		}
+		return $binaryString.TrimEnd('0').Length
+	}
+
 	# Levenshtein distance function for comparing similarity between two strings
 	function Measure-StringDistance {
 		<#
@@ -5589,6 +5600,19 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 							$IPHTML += "`n$($TableData[$i].innerHTML)"
 						}
 					} elseif ($IPAddressInfo -like "*:*") {
+						
+						if ($IPAddressInfo -match "(^|>)(External )?IP(<.*>)?:?(<.*>)? ?$IPRegex *?($|<)" -and $IPAddressInfo -match "Subnet(<.*>)?:?(<.*>)? ?($IPRegex)") {
+							$SubnetMask = $Matches[3]
+							if ($SubnetMask) {
+								$CidrRange = Convert-SubnetMaskToCidr $SubnetMask
+								if ($CidrRange) {
+									$IPAddressInfo -match "(^|>)(External )?IP(<.*>)?:?(<.*>)? ?$IPRegex *?($|<)"
+									if ($Matches[0] -notlike "*-*") { # Ignore if its already an IP range
+										$IPAddressInfo = $IPAddressInfo -replace "(?<start>(^|>)(External )?IP(<.*>)?:?(<.*>)? ?)(?<ip>$IPRegex)(?<end> *?($|<))", ('${start}${ip}/' + $CidrRange + '${end}')
+									}
+								}
+							}
+						}
 						$IPHTML = $IPAddressInfo -replace "Subnet(<.*>)?:?(<.*>)? ?$IPRegex", '' -replace "DNS(<.*>)?:?(<.*>)? ?$IPRegex", ''
 					} else {
 						$IPHTML = $IPAddressInfo
@@ -5674,8 +5698,8 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				}
 
 				$LocationIPs += [PSCustomObject]@{
-					ExternalIPs = $IPs_Parsed
-					InternalIPs = $InternalIPs
+					ExternalIPs = $IPs_Parsed | Sort-Object -Unique
+					InternalIPs = $InternalIPs | Sort-Object -Unique
 					ITGLocation = $Location.id
 					AutotaskLocation = if ($AutotaskLocation) { $AutotaskLocation.id } else { $false }
 					WANs = @($LocationWANs.id)
@@ -5709,7 +5733,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					$Hostname = @($MatchedDevice.sc_hostname + $MatchedDevice.rmm_hostname + $MatchedDevice.sophos_hostname + $MatchedDevice.itg_hostname + $MatchedDevice.autotask_hostname) | Select-Object -First 1
 					Write-Progress -Activity "Updating Device Locations" -PercentComplete $PercentComplete -Status ("Working - " + $PercentComplete + "% (Checking: $Hostname)")
 
-					if (!$MatchedDevice.itg_matches -or !$MatchedDevice.autotask_matches) {
+					if (!$MatchedDevice.itg_matches -and (!$MatchedDevice.autotask_matches -or !$MatchedDevice.rmm_matches)) {
 						continue
 					}
 
@@ -5795,7 +5819,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					}
 
 					# Update locations in Autotask
-					if ($AutotaskConnected -and $Autotask_Locations) {
+					if ($AutotaskConnected -and $Autotask_Locations -and $PossibleLocations.AutotaskLocation) {
 						foreach ($Autotask_DeviceID in $MatchedDevice.autotask_matches) {
 							$AutotaskMatch = $Autotask_DevicesHash[$Autotask_DeviceID]
 							# If currently set location is in $PossibleLocations, dont update
@@ -5817,30 +5841,32 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					}
 
 					# Update Locations in ITG
-					foreach ($ITG_DeviceID in $MatchedDevice.itg_matches) {
-						$ITGMatch = $ITG_DevicesHash[$ITG_DeviceID]
-						$DeviceLocationsUpdateRan = $true
-						# If currently set location is in $PossibleLocations, dont update
-						if ($ITGMatch.attributes.'location-id' -in $PossibleLocations.ITGLocation) {
-							continue
-						}
-						# If the device is synced with autotask then we cannot update ITG directly, instead this will sync down from Autotask which we updated above
-						if ($ITGMatch.attributes.'psa-integration' -and $ITGMatch.attributes.'psa-integration' -ne 'disabled') {
-							continue
-						}
-
-						# Update location
-						Write-Progress -Activity "Updating Device Locations" -PercentComplete $PercentComplete -Status ("Working - " + $PercentComplete + "% (Updating in ITG: $Hostname)")
-						$NewLocation = $PossibleLocations | Select-Object -First 1 # if multiple, just use the first
-
-						$ConfigurationUpdate = @{
-							'type' = 'configurations'
-							'attributes' = @{
-								'location-id' = $NewLocation.ITGLocation
+					if ($PossibleLocations.ITGLocation) {
+						foreach ($ITG_DeviceID in $MatchedDevice.itg_matches) {
+							$ITGMatch = $ITG_DevicesHash[$ITG_DeviceID]
+							$DeviceLocationsUpdateRan = $true
+							# If currently set location is in $PossibleLocations, dont update
+							if ($ITGMatch.attributes.'location-id' -in $PossibleLocations.ITGLocation) {
+								continue
 							}
-						}
+							# If the device is synced with autotask then we cannot update ITG directly, instead this will sync down from Autotask which we updated above
+							if ($ITGMatch.attributes.'psa-integration' -and $ITGMatch.attributes.'psa-integration' -ne 'disabled') {
+								continue
+							}
 
-						Set-ITGlueConfigurations -id $ITG_DeviceID -data $ConfigurationUpdate | Out-Null
+							# Update location
+							Write-Progress -Activity "Updating Device Locations" -PercentComplete $PercentComplete -Status ("Working - " + $PercentComplete + "% (Updating in ITG: $Hostname)")
+							$NewLocation = $PossibleLocations | Select-Object -First 1 # if multiple, just use the first
+
+							$ConfigurationUpdate = @{
+								'type' = 'configurations'
+								'attributes' = @{
+									'location-id' = $NewLocation.ITGLocation
+								}
+							}
+
+							Set-ITGlueConfigurations -id $ITG_DeviceID -data $ConfigurationUpdate | Out-Null
+						}
 					}
 				}
 				Write-Progress -Activity "Updating Device Locations" -Status "Ready" -Completed
