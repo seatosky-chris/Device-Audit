@@ -11,6 +11,7 @@ MatchedDevices/
 Config Files/*
 Config Files/Archive
 *.lnk
+AzureTenants.xlsx
 
 # Allow these config file templates
 !Config Files/*.template
