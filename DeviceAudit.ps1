@@ -1860,27 +1860,27 @@ function compare_activity($MatchedDevice) {
 
 	if ($MatchedDevice.sc_matches -and $MatchedDevice.sc_matches.count -gt 0) {
 		$SCActivity = compare_activity_sc $MatchedDevice.sc_matches
-		$Activity.sc = $SCActivity | Sort-Object last_active | Select-Object -First 1
+		$Activity.sc = $SCActivity | Sort-Object last_active -Descending | Select-Object -First 1
 	}
 
 	if ($MatchedDevice.rmm_matches -and $MatchedDevice.rmm_matches.count -gt 0) {
 		$RMMActivity = compare_activity_rmm $MatchedDevice.rmm_matches
-		$Activity.rmm = $RMMActivity | Sort-Object last_active | Select-Object -First 1
+		$Activity.rmm = $RMMActivity | Sort-Object last_active -Descending | Select-Object -First 1
 	}
 
 	if ($MatchedDevice.sophos_matches -and $MatchedDevice.sophos_matches.count -gt 0) {
 		$SophosActivity = compare_activity_sophos $MatchedDevice.sophos_matches
-		$Activity.sophos = $SophosActivity | Sort-Object last_active | Select-Object -First 1
+		$Activity.sophos = $SophosActivity | Sort-Object last_active -Descending | Select-Object -First 1
 	}
 
 	if ($MatchedDevice.azure_matches -and $MatchedDevice.azure_matches.count -gt 0) {
 		$AzureActivity = compare_activity_azure $MatchedDevice.azure_matches
-		$Activity.azure = $AzureActivity | Sort-Object last_active | Select-Object -First 1
+		$Activity.azure = $AzureActivity | Sort-Object last_active -Descending | Select-Object -First 1
 	}
 
 	if ($MatchedDevice.intune_matches -and $MatchedDevice.intune_matches.count -gt 0) {
 		$IntuneActivity = compare_activity_intune $MatchedDevice.intune_matches
-		$Activity.intune = $IntuneActivity | Sort-Object last_active | Select-Object -First 1
+		$Activity.intune = $IntuneActivity | Sort-Object last_active -Descending | Select-Object -First 1
 	}
 
 	$Activity
