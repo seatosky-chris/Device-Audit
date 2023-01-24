@@ -132,7 +132,20 @@ if ($AutotaskAPIKey.Key) {
 	$Creds = New-Object System.Management.Automation.PSCredential($AutotaskAPIKey.Username, $Secret)
 	Add-AutotaskAPIAuth -ApiIntegrationcode $AutotaskAPIKey.IntegrationCode -credentials $Creds
 	Add-AutotaskBaseURI -BaseURI $AutotaskAPIKey.Url
+	
+	# Verify the Autotask API key works
 	$AutotaskConnected = $true
+	try { 
+		Get-AutotaskAPIResource -Resource Companies -ID 0 -ErrorAction Stop 
+	} catch { 
+		$CleanError = ($_ -split "/n")[0]
+		if ($_ -like "*(401) Unauthorized*") {
+			$CleanError = "API Key Unauthorized. ($($CleanError))"
+		}
+		Write-Host $CleanError -ForegroundColor Red
+		Write-Error $CleanError
+		$AutotaskConnected = $false
+	}
 }
 
 # Connect to Microsoft Graph (for Azure/Intune)

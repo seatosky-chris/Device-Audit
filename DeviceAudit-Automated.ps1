@@ -181,7 +181,21 @@ if ($AutotaskAPIKey.Key) {
 	$Creds = New-Object System.Management.Automation.PSCredential($AutotaskAPIKey.Username, $Secret)
 	Add-AutotaskAPIAuth -ApiIntegrationcode $AutotaskAPIKey.IntegrationCode -credentials $Creds
 	Add-AutotaskBaseURI -BaseURI $AutotaskAPIKey.Url
+	
+	# Verify the Autotask API key works
 	$AutotaskConnected = $true
+	try { 
+		Get-AutotaskAPIResource -Resource Companies -ID 0 -ErrorAction Stop 
+		Write-PSFMessage -Level Verbose -Message "Successfully connected to Autotask."
+	} catch { 
+		$CleanError = ($_ -split "/n")[0]
+		if ($_ -like "*(401) Unauthorized*") {
+			$CleanError = "API Key Unauthorized. ($($CleanError))"
+		}
+		Write-Host $CleanError -ForegroundColor Red
+		Write-PSFMessage -Level Error -Message $CleanError
+		$AutotaskConnected = $false
+	}
 }
 
 # Connect to Sophos
@@ -321,7 +335,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	# Connect to JumpCloud (if applicable)
 	$JCConnected = $false
 	if ($JumpCloudAPIKey -and $JumpCloudAPIKey.Key) {
-		Connect-JCOnline -JumpCloudApiKey $JumpCloudAPIKey.Key
+		Connect-JCOnline -JumpCloudApiKey $JumpCloudAPIKey.Key -Force
 		$JCConnected = $true
 	}
 
