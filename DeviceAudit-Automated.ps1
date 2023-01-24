@@ -5578,9 +5578,11 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					continue
 				}
 
-				$IPs_Parsed = @()
+				$IPs_Parsed = @() # All of locations IPs
+				$IPs_To_WAN = @{}
 				foreach ($WAN in $LocationWANs) {
 					$IPAddressInfo = $WAN.attributes.traits.'ip-address-es'
+					$IPAddressInfo = $IPAddressInfo -replace [char]0x00a0,' '
 					$IPHTML = ""
 		
 					# Parse the html on the WAN page
@@ -5615,19 +5617,19 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						}
 					} elseif ($IPAddressInfo -like "*:*") {
 						
-						if ($IPAddressInfo -match "(^|>)(External )?IP(<.*>)?:?(<.*>)? ?$IPRegex *?($|<)" -and $IPAddressInfo -match "Subnet(<.*>)?:?(<.*>)? ?($IPRegex)") {
-							$SubnetMask = $Matches[3]
+						if ($IPAddressInfo -match "(^|>)(External )?IP(<.*>)?:?(<.*>)? *$IPRegex *?($|<)" -and $IPAddressInfo -match "Subnet ?(Mask)?(<.*>)?:?(<.*>)? *($IPRegex)") {
+							$SubnetMask = $Matches[4]
 							if ($SubnetMask) {
 								$CidrRange = Convert-SubnetMaskToCidr $SubnetMask
 								if ($CidrRange) {
-									$IPAddressInfo -match "(^|>)(External )?IP(<.*>)?:?(<.*>)? ?$IPRegex *?($|<)"
-									if ($Matches[0] -notlike "*-*") { # Ignore if its already an IP range
-										$IPAddressInfo = $IPAddressInfo -replace "(?<start>(^|>)(External )?IP(<.*>)?:?(<.*>)? ?)(?<ip>$IPRegex)(?<end> *?($|<))", ('${start}${ip}/' + $CidrRange + '${end}')
+									$IPAddressInfo -match "(^|>)(External )?IP(<.*>)?:?(<.*>)? *$IPRegex *?($|<)"
+									if ($Matches[0] -notlike "*-*" -and $Matches[0] -notlike "*/*") { # Ignore if its already an IP range or cidr range
+										$IPAddressInfo = $IPAddressInfo -replace "(?<start>(^|>)(External )?IP(<.*>)?:?(<.*>)? *)(?<ip>$IPRegex)(?<end> *?($|<))", ('${start}${ip}/' + $CidrRange + '${end}')
 									}
 								}
 							}
 						}
-						$IPHTML = $IPAddressInfo -replace "Subnet(<.*>)?:?(<.*>)? ?$IPRegex", '' -replace "DNS(<.*>)?:?(<.*>)? ?$IPRegex", ''
+						$IPHTML = $IPAddressInfo -replace "Subnet ?(Mask)?(<.*>)?:?(<.*>)? *$IPRegex", '' -replace "DNS( IP)?(v4|v6)?( \d)?(<.*>)?:?(<.*>)? *$IPRegex", ''
 					} else {
 						$IPHTML = $IPAddressInfo
 					}
@@ -5638,6 +5640,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					if ($Matches -and $Matches.value) {
 						$IPs = @($Matches.Value)
 						foreach ($IP in $IPs) {
+							$FoundIPs = @()
 							if ($IP -like "*-*" -and $IP -like "*/*") {
 								$IP = $IP -replace '(\/[1-3][0-9])$', ''
 							}
@@ -5649,17 +5652,26 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 								$AllEndingOctets = $RangeFrom..$RangeTo
 		
 								foreach ($EndingOctet in $AllEndingOctets) {
-									$IPs_Parsed += "$($Octets[0]).$($Octets[1]).$($Octets[2]).$($EndingOctet)"
+									$FoundIPs += "$($Octets[0]).$($Octets[1]).$($Octets[2]).$($EndingOctet)"
 								}
 							} elseif ($IP -like "*/*") {
 								$IPRange = Get-Subnet $IP
-								$IPs_Parsed += $IPRange.IPAddress.IPAddressToString
+								$FoundIPs += @($IPRange.IPAddress.IPAddressToString)
 								$IPRange.HostAddresses | ForEach-Object {
-									$IPs_Parsed += $_
+									$FoundIPs += $_
 								}
-								$IPs_Parsed += $IPRange.BroadcastAddress.IPAddressToString
+								$FoundIPs += $IPRange.BroadcastAddress.IPAddressToString
 							} else {
-								$IPs_Parsed += $IP
+								$FoundIPs += $IP
+							}
+
+							$IPs_Parsed += $FoundIPs
+							
+							foreach ($FoundIP in $FoundIPs) {
+								if (!$IPs_To_WAN[$FoundIP]) {
+									$IPs_To_WAN[$FoundIP] = @()
+								}
+								$IPs_To_WAN[$FoundIP] += $WAN.id
 							}
 						}
 					}
@@ -5718,6 +5730,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					AutotaskLocation = if ($AutotaskLocation) { $AutotaskLocation.id } else { $false }
 					WANs = @($LocationWANs.id)
 					LANs = @($ValidLANs)
+					IPs_To_WAN = $($IPs_To_WAN)
 				}
 			}
 
@@ -5806,7 +5819,12 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						if ($ITGMatch.attributes.'location-id' -and $ITGMatch.attributes.'location-id' -in $PossibleLocations.ITGLocation) {
 							$ExistingLocation = $PossibleLocations | Where-Object { $ITGMatch.'location-id' -in $_.Location } | Select-Object -First 1
 							if ($ExistingLocation.WANs) {
-								foreach ($WAN_ID in $ExistingLocation.WANs) {
+								$DeviceWANs = @()
+								foreach ($Device_ExtIP in $ExternalIP) {
+									$DeviceWANs += $ExistingLocation.IPs_To_WAN[$Device_ExtIP]
+								}
+								$DeviceWANs = $DeviceWANs | Sort-Object -Unique
+								foreach ($WAN_ID in $DeviceWANs) {
 									$WANDevices[$WAN_ID] += $MatchedDevice.id
 								}
 							}
@@ -5814,7 +5832,12 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 							# Otherwise use the newly chosen location
 							$NewLocation = $PossibleLocations | Select-Object -First 1
 							if ($NewLocation.WANs) {
-								foreach ($WAN_ID in $NewLocation.WANs) {
+								$DeviceWANs = @()
+								foreach ($Device_ExtIP in $ExternalIP) {
+									$DeviceWANs += $NewLocation.IPs_To_WAN[$Device_ExtIP]
+								}
+								$DeviceWANs = $DeviceWANs | Sort-Object -Unique
+								foreach ($WAN_ID in $DeviceWANs) {
 									$WANDevices[$WAN_ID] += $MatchedDevice.id
 								}
 							}
