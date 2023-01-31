@@ -4108,6 +4108,62 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				$UserUsage = $false
 			}
 
+			# Update ITG_ID's for existing users (this mainly matters for customers that don't use the User Device Audit and local accounts)
+			if (($ExistingUsers | Where-Object { !$_.ITG_ID } | Measure-Object).Count -gt 0) {
+				$Now_UTC = Get-Date (Get-Date).ToUniversalTime() -UFormat '+%Y-%m-%dT%H:%M:%S.000Z'
+				$ITG_Contacts = Get-ITGlueContacts -organization_id $ITG_ID -page_size 10000
+				if ($ITG_Contacts.data) {
+					$ITG_Contacts = $ITG_Contacts.data
+				}
+
+				$PossibleUsernames = @{}
+				foreach ($ITGContact in $ITG_Contacts) {
+					foreach ($Format in @($UsernameFormat)) {
+						$PossibleUsername = $Format.replace("[first]", $ITGContact.attributes.'first-name').replace("[last]", $ITGContact.attributes.'last-name').replace("[firstInitial]", $ITGContact.attributes.'first-name'[0]).replace("[lastInitial]", $ITGContact.attributes.'last-name'[0])
+						if (!$PossibleUsernames[$PossibleUsername]) {
+							$PossibleUsernames[$PossibleUsername] = @()
+						}
+						$PossibleUsernames[$PossibleUsername] += $ITGContact.id
+					}
+				}
+
+				for ($j = 0; $j -lt $ExistingUsers.Count; $j++) {
+					$DBUser = $ExistingUsers[$j]
+
+					if (!$DBUser.ITG_ID) {
+						if (!$DBUser.Username) {
+							continue
+						}
+						$UpdateDB = $false
+
+						# Check first for a local username match in the ITG contact notes
+						$ITGContact = $ITG_Contacts | Where-Object { $_.attributes.notes -match "(^|\s|>)(AD )?Username: ($([Regex]::Escape($DBUser.Username.Trim())))($|\s|<)" }
+						if ($ITGContact) {
+							$ExistingUsers[$j].ITG_ID = ($ITGContact | Select-Object -First 1).Id
+							if (($ITGContact | Measure-Object).Count -eq 1) {
+								$UpdateDB = $true
+							}
+						}
+
+						# Check based on default username format
+						if ($PossibleUsernames[$DBUser.Username] -and !$ExistingUsers[$j].ITG_ID) {
+							$ExistingUsers[$j].ITG_ID = $PossibleUsernames[$DBUser.Username][0]
+							if (($PossibleUsernames[$DBUser.Username] | Measure-Object).Count -eq 1) {
+								$UpdateDB = $true
+							}
+						}
+
+						if ($UpdateDB -and $ExistingUsers[$j].ITG_ID) {
+							# Update database
+							$UpdatedUser = $DBUser | Select-Object Id, Domain, DomainOrLocal, Username, LastUpdated, type, O365Email, ITG_ID, ADUsername
+							$UpdatedUser.ITG_ID = $ExistingUsers[$j].ITG_ID
+							$UpdatedUser.LastUpdated = $Now_UTC
+							Set-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Users" -Id $DBUser.Id -DocumentBody ($UpdatedUser | ConvertTo-Json) -PartitionKey 'user' | Out-Null
+						}
+					}
+				}
+			}
+
 			$DeviceUsers = @()
 			$AssignedUsers = @()
 			$FullUpdate = $false
@@ -4273,9 +4329,11 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 			# All devices / users mapped, update IT Glue (if it's a full update, delete existing mappings as well)
 			if ($DeviceUsers) {
-				$ITG_Contacts = Get-ITGlueContacts -organization_id $ITG_ID -page_size 10000
-				if ($ITG_Contacts.data) {
-					$ITG_Contacts = $ITG_Contacts.data
+				if (!$ITG_Contacts) {
+					$ITG_Contacts = Get-ITGlueContacts -organization_id $ITG_ID -page_size 10000
+					if ($ITG_Contacts.data) {
+						$ITG_Contacts = $ITG_Contacts.data
+					}
 				}
 				$ITGLocations = Get-ITGlueLocations -org_id $ITG_ID
 				if ($ITGLocations.data) {
