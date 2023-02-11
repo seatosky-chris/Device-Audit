@@ -4079,35 +4079,6 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				}
 			}
 
-			# Update our data on all the users and computers (we need this to match id's to ITG)
-			$Query = "SELECT * FROM Computers c"
-			$ExistingComputers = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Computers" -Query $Query -PartitionKey 'computer'
-			$Query = "SELECT * FROM Users u"
-			$ExistingUsers = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Users" -Query $Query -PartitionKey 'user'
-
-			if (!$LastUpdated -and (!$MonthlyStatsUpdated -or !$Updated_ComputerUsage -or !$Updated_UserUsage)) {
-				# If we have not updated the users before, and we didn't just update the monthly stats, grab the most recent monthly stats
-				# Otherwise, we'll only update based on these at the end of the month just after updating the monthly stats
-				$Year_Month = Get-Date (Get-Date).AddMonths(-1) -Format 'yyyy-MM'
-				$Usage = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Usage" -Query "SELECT * FROM Usage AS u WHERE u.yearmonth = '$Year_Month'" -PartitionKey $Year_Month
-				if ($Usage) {
-					# Get all existing monthly stats
-					$ComputerIDs = $Usage.ComputerID | Select-Object -Unique
-					$Query = "SELECT * FROM ComputerUsage AS cu WHERE cu.id IN ('$($ComputerIDs -join "', '")')"
-					$ComputerUsage = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "ComputerUsage" -Query $Query -QueryEnableCrossPartition $true
-		
-					$UserIDs = $Usage.UserID | Select-Object -Unique
-					$Query = "SELECT * FROM UserUsage AS uu WHERE uu.id IN ('$($UserIDs -join "', '")')"
-					$UserUsage = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "UserUsage" -Query $Query -QueryEnableCrossPartition $true
-				}
-			} elseif ($Updated_ComputerUsage -and $Updated_UserUsage) {
-				$ComputerUsage = $Updated_ComputerUsage
-				$UserUsage = $Updated_UserUsage
-			} else {
-				$ComputerUsage = $false
-				$UserUsage = $false
-			}
-
 			# Update ITG_ID's for existing users (this mainly matters for customers that don't use the User Device Audit and local accounts)
 			if (($ExistingUsers | Where-Object { !$_.ITG_ID } | Measure-Object).Count -gt 0) {
 				$Now_UTC = Get-Date (Get-Date).ToUniversalTime() -UFormat '+%Y-%m-%dT%H:%M:%S.000Z'
@@ -4162,6 +4133,35 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						}
 					}
 				}
+			}
+
+			# Update our data on all the users and computers (we need this to match id's to ITG)
+			$Query = "SELECT * FROM Computers c"
+			$ExistingComputers = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Computers" -Query $Query -PartitionKey 'computer'
+			$Query = "SELECT * FROM Users u"
+			$ExistingUsers = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Users" -Query $Query -PartitionKey 'user'
+
+			if (!$LastUpdated -and (!$MonthlyStatsUpdated -or !$Updated_ComputerUsage -or !$Updated_UserUsage)) {
+				# If we have not updated the users before, and we didn't just update the monthly stats, grab the most recent monthly stats
+				# Otherwise, we'll only update based on these at the end of the month just after updating the monthly stats
+				$Year_Month = Get-Date (Get-Date).AddMonths(-1) -Format 'yyyy-MM'
+				$Usage = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Usage" -Query "SELECT * FROM Usage AS u WHERE u.yearmonth = '$Year_Month'" -PartitionKey $Year_Month
+				if ($Usage) {
+					# Get all existing monthly stats
+					$ComputerIDs = $Usage.ComputerID | Select-Object -Unique
+					$Query = "SELECT * FROM ComputerUsage AS cu WHERE cu.id IN ('$($ComputerIDs -join "', '")')"
+					$ComputerUsage = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "ComputerUsage" -Query $Query -QueryEnableCrossPartition $true
+		
+					$UserIDs = $Usage.UserID | Select-Object -Unique
+					$Query = "SELECT * FROM UserUsage AS uu WHERE uu.id IN ('$($UserIDs -join "', '")')"
+					$UserUsage = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "UserUsage" -Query $Query -QueryEnableCrossPartition $true
+				}
+			} elseif ($Updated_ComputerUsage -and $Updated_UserUsage) {
+				$ComputerUsage = $Updated_ComputerUsage
+				$UserUsage = $Updated_UserUsage
+			} else {
+				$ComputerUsage = $false
+				$UserUsage = $false
 			}
 
 			$DeviceUsers = @()
