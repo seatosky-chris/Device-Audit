@@ -385,11 +385,13 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		$SophosTenantID = $CompanyInfo.id
 		$TenantApiHost = $CompanyInfo.apiHost
 	} else {
+		$SophosTenantID = $false
 		Write-PSFMessage -Level Error -Message "Failed to connect to: Sophos (Tenant not found)"
 	}
 
 	# Get the Sophos endpoints
 	$SophosEndpoints = $false
+	$Sophos_Devices = @()
 	if ($SophosTenantID -and $TenantApiHost) {
 		$SophosHeader = @{
 			Authorization = "Bearer $SophosJWT"
