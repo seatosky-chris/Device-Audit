@@ -4826,10 +4826,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						$AutotaskLocation = $Autotask_Locations | Where-Object { $_.id -eq $AutotaskDevice.companyLocationID }
 						$AutotaskContact = $Autotask_Contacts | Where-Object { $_.id -eq $AutotaskDevice.contactID }
 
-						if ($AutotaskLocation) {
+						if (!$Location -and $AutotaskLocation) {
 							$Location = $AutotaskLocation.name
 						}
-						if ($AutotaskContact) {
+						if (!$AssignedUser -and $AutotaskContact) {
 							$AssignedUser = $AutotaskContact.firstName + " " + $AutotaskContact.lastName
 						}
 						if (!$Hostname) {
