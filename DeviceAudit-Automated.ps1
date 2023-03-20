@@ -1,6 +1,6 @@
 param(
 	$companies = @(),
-	$ForceMonthlyUsageRollup = $false
+	[switch]$ForceMonthlyUsageRollup
 )
 #####################################################################
 ### Run this with a single argument
