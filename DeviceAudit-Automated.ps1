@@ -876,6 +876,19 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				# Mac address  (if this is a VM, only check this if we haven't found any related devices so far. VM's can cause false positives with this search.)
 				if ($Device.GuestHardwareNetworkAddress -and (!$Related_RMMDevices -or $Device.GuestMachineModel -notlike "Virtual Machine")) {
 					$MacRelated_RMMDevices = $RMM_Devices | Where-Object { $_.MacAddresses.macAddress -contains $Device.GuestHardwareNetworkAddress -and $_."Device UID" -notin $IgnoreRMM }
+					if ($MacRelated_RMMDevices.MacAddresses.instance) {
+						$MacRelated_RMMDevices = $MacRelated_RMMDevices | Where-Object { 
+							# Remove any usb adapter mac matches unless the hostname also matches
+							$ConnectedMac = $_.MacAddresses | Where-Object { $_.macAddress -like $Device.GuestHardwareNetworkAddress }
+							if (($ConnectedMac.instance -like "*USB*" -or $ConnectedMac.instance -like "*Ethernet Adapter*" -or $ConnectedMac.instance -like "*Modem Mobile Broadband Device*") -and $Device.Name -notlike $_."Device Hostname" -and $Device.GuestMachineName -notlike $_."Device Hostname") {
+								$false
+								return
+							} else {
+								$_
+								return
+							}
+						}
+					}
 					$Related_RMMDevices += $MacRelated_RMMDevices
 				}
 
