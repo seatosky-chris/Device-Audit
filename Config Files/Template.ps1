@@ -256,6 +256,19 @@ $Allow_Tamper_Protection_Disabled = @(
 ###################################################  CONSTANTS  ##################################################
 ##################################################################################################################
 
+# $UsernameFormat
+#
+# The format of usernames, if applicable
+# If you do not use the User Audit for this organization, or you use local user accounts, this can be used as a backup for user matching
+# If the device audit can't get the ITG contact from the Device DB, it will attempt to match it to an ITG contact based on this format and the contact names
+#
+# Use the keywords "[first]" (first name), "[last]" (last name), "[firstInitial]" (first letter of first name), and "[lastInitial]" (first letter of last name)
+# and any other symbols or letters to build the username format. You can also make an array of formats if the organization uses multiple.
+#
+# Examples: "[first].[last]" (john.doe), "[first]" (john), "[last]" (doe), "[firstInitial][last]" (jdoe), "[last][firstInitial]" (doej)
+#
+$UsernameFormat = "[first].[last]"
+
 # $IgnoreSerials
 #
 # Default serial numbers to ignore 
