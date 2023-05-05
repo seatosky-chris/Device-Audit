@@ -5638,7 +5638,14 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			$ITGLocations = $ITGLocations.data
 		}
 		if ($OverviewFilterID) {
-			$CustomOverviews = Get-ITGlueFlexibleAssets -filter_flexible_asset_type_id $OverviewFilterID.id -filter_organization_id $ITG_ID
+			$CustomOverviews = Get-ITGlueFlexibleAssets -page_size 1000 -filter_flexible_asset_type_id $OverviewFilterID.id -filter_organization_id $ITG_ID
+			$i = 1
+			while ($CustomOverviews.links.next) {
+				$i++
+				$CustomOverviews_Next = Get-ITGlueFlexibleAssets -page_size 1000 -page_number $i -filter_flexible_asset_type_id $OverviewFilterID.id -filter_organization_id $ITG_ID
+				$CustomOverviews.data += $CustomOverviews_Next.data
+				$CustomOverviews.links = $CustomOverviews_Next.links
+			}
 			$WANCustomOverviews = $CustomOverviews.data | Where-Object { $_.attributes.name -like "WAN: *" }
 			$LANCustomOverviews = $CustomOverviews.data | Where-Object { $_.attributes.name -like "LAN: *" }
 		}
