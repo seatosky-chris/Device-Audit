@@ -6025,7 +6025,8 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				foreach ($WAN_ID in $WANDevices.keys) {
 					$WAN = $WANs | Where-Object { $_.id -eq $WAN_ID }
 					$Title = "WAN: Seen Devices - $($WAN.attributes.traits.label)"
-					$ExistingOverview = $WANCustomOverviews | Where-Object { $_.attributes.traits.label -like $Title -or $_.attributes.traits.overview -like "*WAN ID: '$WAN_ID'*" } | Select-Object -First 1
+					$ExistingOverview = $WANCustomOverviews | Where-Object { $_.attributes.traits.label -like $Title -or $_.attributes.traits.overview -like "*WAN ID: '$WAN_ID'*" } | Sort-Object -Property {$_.attributes.'updated-at'} -Descending | Select-Object -First 1
+
 					$DeviceTable = @()
 					$DeviceHistory = @()
 
@@ -6241,7 +6242,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				foreach ($LAN_ID in $LANDevices.keys) {
 					$LAN = $LANs | Where-Object { $_.id -eq $LAN_ID }
 					$Title = "LAN: Seen Devices - $($LAN.attributes.traits.name)"
-					$ExistingOverview = $LANCustomOverviews | Where-Object { $_.attributes.traits.name -like $Title -or $_.attributes.traits.overview -like "*LAN ID: '$LAN_ID'*" } | Select-Object -First 1
+					$ExistingOverview = $LANCustomOverviews | Where-Object { $_.attributes.traits.name -like $Title -or $_.attributes.traits.overview -like "*LAN ID: '$LAN_ID'*" } | Sort-Object -Property {$_.attributes.'updated-at'} -Descending | Select-Object -First 1
 					$DeviceTable = @()
 					$DeviceHistory = @()
 
