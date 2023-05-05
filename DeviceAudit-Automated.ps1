@@ -5830,6 +5830,15 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				}
 			}
 
+			if ($LocationIPsLocation) {
+				if (!(Test-Path -Path $LocationIPsLocation)) {
+					New-Item -ItemType Directory -Force -Path $LocationIPsLocation | Out-Null
+				}
+
+				$LocationIPsPath = "$($LocationIPsLocation)\$($Company_Acronym)_location_ips.json"
+				$LocationIPs | ConvertTo-Json | Out-File -FilePath $LocationIPsPath
+			}
+
 			# Prep overview lists
 			$WANDevices = @{}
 			$LANDevices = @{}

@@ -262,6 +262,16 @@ $CPUDataLocation = "C:\Users\Administrator\Documents\Device Audit\CPUData"
 $DeviceUsersLocation = "C:\Users\Administrator\Documents\Device Audit\DeviceUsers"
 
 ####################
+# $LocationIPsLocation
+#
+# The location to store a json file of all the locations and the External and Internal IPs associated with them
+# Can be used for auditing and for other scripts to search by WAN/LAN IPs
+#
+# Example: $LocationIPsLocation = "C:\Users\Administrator\Documents\LocationIPs"
+#
+$LocationIPsLocation = "C:\Users\Administrator\Documents\Device Audit\LocationIPs"
+
+####################
 # $WAN_LAN_HistoryLocation
 #
 # The location to store previous devices found in each WAN / LAN
