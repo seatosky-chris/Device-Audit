@@ -3013,6 +3013,22 @@ if ($DOITGArchivalReview -and $ITGConnected) {
 		}
 	}
 
+	# Update ITGlue (Manufactuers/Models, if missing)
+	if ($ITGConnected) {
+		foreach ($ITG_Device in $ITG_Devices) {
+			$MatchedDevice = $MatchedDevices | Where-Object { $ITG_Device.id -in $_.itg_matches } | Select-Object -First 1
+
+			if (!$MatchedDevice) {
+				$PossiblyArchive += [pscustomobject]@{
+					id = $ITG_Device.id
+					name = $ITG_Device.attributes.name
+					url = $ITG_Device.attributes.'resource-url'
+				}
+				continue
+			}
+		}
+	}
+
 	if ($PossiblyArchive) {
 		$PossiblyArchive | Out-GridView -PassThru -Title 'Devices flagged for possible archival in IT Glue'
 	} else {
