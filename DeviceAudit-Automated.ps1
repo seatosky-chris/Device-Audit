@@ -599,7 +599,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 										extIpAddress, intIpAddress,
 										@{Name="Last User"; E={$_.lastLoggedInUser}}, Domain, @{Name="Operating System"; E={$_.operatingSystem}}, 
 										Manufacturer, @{Name="Device Model"; E={$_.model}}, @{Name="Warranty Expiry"; E={$_.warrantyDate}}, @{Name="Device Description"; E={$_.description}}, 
-										memory, cpus, cpuCores, url,
+										memory, cpus, cpuCores, url, @{Name="Antivirus"; E={$_.antivirus.antivirusProduct}},
 										@{Name="ScreenConnectID"; E={
 											$SC = $_.udf.udf13;
 											if ($SC -and $SC -like "*$($SCLogin.URL.TrimStart('http').TrimStart('s').TrimStart('://'))*") {
@@ -2551,6 +2551,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			if ($SophosDeviceIDs) {
 				$SophosLink = "https://cloud.sophos.com/manage/devices/computers/$($SophosDevices[0].webID)"
 			}
+			$RMMAntivirus = $false
+			if (!$SophosDeviceIDs -and $RMMDeviceIDs) {
+				$RMMAntivirus = $RMMDevices[0].Antivirus
+			}
 
 			# This device does not look like it belongs here, lets flag it
 			$MoveDevices += [PsCustomObject]@{
@@ -2558,7 +2562,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				DeviceType = $DeviceType
 				InSC = if ($SCDeviceIDs) { "Yes" } else { "No" }
 				InRMM = if ($RMMDeviceIDs) { "Yes" } else { "No" }
-				InSophos = if ($SophosDeviceIDs) { "Yes" } else { "No" }
+				InSophos = if ($SophosDeviceIDs) { "Yes" } elseif ($RMMAntivirus -and $RMMAntivirus -like "Sophos*") { "Yes, missing from portal" } else { "No" }
 				SC_Link = $SCLink
 				RMM_Link = $RMMLink
 				Sophos_Link = $SophosLink
@@ -2973,6 +2977,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					if ($SophosDeviceIDs) {
 						$SophosLink = "https://cloud.sophos.com/manage/devices/computers/$($SophosDevices[0].webID)"
 					}
+					$RMMAntivirus = $false
+					if (!$SophosDeviceIDs -and $RMMDeviceIDs) {
+						$RMMAntivirus = $RMMDevices[0].Antivirus
+					}
 
 					# See if we can try to automatically fix this issue
 					$AutoFix = $false
@@ -3044,7 +3052,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						LastActive = $NewestDate
 						InSC = if ($SCDeviceIDs) { "Yes" } elseif (ignore_install -Device $Device -System 'sc') { "Ignore" } else { "No" }
 						InRMM = if ($RMMDeviceIDs) { "Yes" }  elseif (ignore_install -Device $Device -System 'rmm') { "Ignore" } else { "No" }
-						InSophos = if ($SophosDeviceIDs) { "Yes" } elseif (ignore_install -Device $Device -System 'sophos') { "Ignore" } else { "No" }
+						InSophos = if ($SophosDeviceIDs) { "Yes" } elseif ($RMMAntivirus -and $RMMAntivirus -like "Sophos*") { "Yes, missing from portal" } elseif (ignore_install -Device $Device -System 'sophos') { "Ignore" } else { "No" }
 						AutoFix_Attempted = $AutoFix
 						SC_Link = $SCLink
 						RMM_Link = $RMMLink
@@ -3200,6 +3208,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					if ($SophosDeviceID) {
 						$SophosLink = "https://cloud.sophos.com/manage/devices/computers/$($SophosDevice.webID)"
 					}
+					$RMMAntivirus = $false
+					if (!$SophosDeviceID -and $RMMDeviceID) {
+						$RMMAntivirus = $RMMDevice.Antivirus
+					}
 
 					$DeleteSC = "No"
 					if ($SCDeviceID -and !$RMMOnly) {
@@ -3274,7 +3286,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						WarrantyExpiry = $WarrantyExpiry
 						InSC = if ($SCDeviceID -and !$RMMOnly) { "Yes" } elseif ($SCDeviceID) { "Yes, but don't delete yet" } else { "No" }
 						InRMM = if ($RMMDeviceID) { "Yes" } else { "No" }
-						InSophos = if ($SophosDeviceID -and !$RMMOnly) { "Yes" } elseif ($SophosDeviceID) { "Yes, but don't delete yet" } else { "No" }
+						InSophos = if ($SophosDeviceID -and !$RMMOnly) { "Yes" } elseif ($SophosDeviceID) { "Yes, but don't delete yet" } elseif ($RMMAntivirus -and $RMMAntivirus -like "Sophos*") { "Yes, missing from portal" } else { "No" }
 						DeleteSC = $DeleteSC
 						DeleteRMM = $DeleteRMM
 						DeleteSophos = $DeleteSophos
@@ -4780,6 +4792,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				$IntuneCompliance = $false
 				$IntuneDeviceOwnerType = $false
 				$IntuneIsEncrypted = $null
+				$RMMAntivirus = $false
 
 				if ($RMMDeviceID) {
 					$RMMDevice = $RMM_DevicesHash[$RMMDeviceID]
@@ -4948,6 +4961,9 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						$SophosTamperKey = $SophosTamperInfo.password
 						$SophosTamperStatus = $SophosTamperInfo.enabled
 					}
+				}
+				if (!$SophosDeviceID -and $RMMDeviceID) {
+					$RMMAntivirus = $RMMDevice.Antivirus
 				}
 
 				# get cpu performance score
@@ -5197,7 +5213,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					"Is Encrypted (Intune)" = if ($null -ne $IntuneIsEncrypted) { $IntuneIsEncrypted } else { "NA" }
 					InSC = if ($SCDeviceID) { "Yes" } else { "No" }
 					InRMM = if ($RMMDeviceID) { "Yes" } else { "No" }
-					InSophos = if ($SophosDeviceID) { "Yes" } else { "No" }
+					InSophos = if ($SophosDeviceID) { "Yes" } elseif ($RMMAntivirus -and $RMMAntivirus -like "Sophos*") { "Yes, missing from portal" } else { "No" }
 					InITG = if ($ITGDeviceID) { "Yes" } else { "No" }
 					InAutotask = if ($AutotaskDeviceID) { "Yes" } else { "No" }
 					InJumpCloud = if ($JumpCloudDeviceID) { if ($JumpCloudDevice.active) { "Yes (Active)" } else { "Yes (Inactive)" } } else { "No" }
