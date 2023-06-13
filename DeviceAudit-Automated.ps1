@@ -1734,6 +1734,15 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	Write-Host "Matching Complete!"
 	Write-Host "===================="
 
+	# Get a list of Autotask tickets related to RMM, SC, or Sophos agent issues
+	$RepairTickets = Get-AutotaskAPIResource -Resource Tickets -SearchQuery '{"filter":[{"op":"noteq","field":"Status","value":5},{"op":"or","items": [{"op":"contains","field":"title","value":"RMM"},{"op":"contains","field":"title","value":"SC"},{"op":"contains","field":"title","value":"ScreenConnect"},{"op":"contains","field":"title","value":"Sophos"}]}]}'
+	$RepairTickets = $RepairTickets | Where-Object {
+		$_.title -like "*Reinstall RMM*" -or $_.title -like "*Install RMM*" -or $_.title -like"*Audit RMM*" -or $_.title -like "*Troubleshoot RMM*" -or $_.title -like "*Repair RMM*" -or
+		$_.title -like "*Reinstall SC*" -or $_.title -like "*Install SC*" -or $_.title -like"*Audit SC*" -or $_.title -like "*Troubleshoot SC*" -or $_.title -like "*Repair SC*" -or
+		$_.title -like "*Reinstall ScreenConnect*" -or $_.title -like "*Install ScreenConnect*" -or $_.title -like"*Audit ScreenConnect*" -or $_.title -like "*Troubleshoot ScreenConnect*" -or $_.title -like "*Repair ScreenConnect*" -or
+		$_.title -like "*Reinstall Sophos*" -or $_.title -like "*Install Sophos*" -or $_.title -like"*Audit Sophos*" -or $_.title -like "*Troubleshoot Sophos*" -or $_.title -like "*Repair Sophos*"
+	}
+
 	# Get the existing log
 	$LogFilePath = "$($LogLocation)\$($Company_Acronym)_log.json"
 	if ($LogLocation -and (Test-Path -Path $LogFilePath)) {
@@ -1828,6 +1837,34 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		return $Newest.datetime - $Oldest.datetime
 	}
 
+	# Function for querying repair tickets based on the possible filters
+	# $ServiceTarget is 'rmm', 'sc', or 'sophos'
+	# $Hostname can be a single hostname or an array of hostnames to check for
+	function repair_tickets($ServiceTarget = "", $Hostname = "") {
+		if ($ServiceTarget -eq 'rmm') {
+			$RepairTickets_ByService = $RepairTickets | Where-Object { $_.title -like "RMM *" -or $_.title -like "* RMM" -or $_.title -like "* RMM *" }
+		} elseif ($ServiceTarget -eq 'sc') {
+			$RepairTickets_ByService = $RepairTickets | Where-Object { $_.title -like "SC *" -or $_.title -like "* SC" -or $_.title -like "* SC *" -or $_.title -like "*ScreenConnect*" }
+		} elseif ($ServiceTarget -eq 'sophos') {
+			$RepairTickets_ByService = $RepairTickets | Where-Object { $_.title -like "Sophos *" -or $_.title -like "* Sophos" -or $_.title -like "* Sophos *" }
+		} else {
+			$RepairTickets_ByService = $RepairTickets
+		}
+
+		if ($Hostname -is [array]) {
+			$RepairTickets_FilteredIDs = @()
+			foreach ($UniqueHostname in $Hostname) {
+				$RepairTickets_FilteredIDs += ($RepairTickets_ByService | Where-Object { $_.title -like "*$($UniqueHostname)*" }).Id
+			}
+			$RepairTickets_FilteredIDs = $RepairTickets_FilteredIDs | Sort-Object -Unique
+			$RepairTickets_Filtered = $RepairTickets_ByService | Where-Object { $_.Id -in $RepairTickets_FilteredIDs }
+		} else {
+			$RepairTickets_Filtered = $RepairTickets_ByService | Where-Object { $_.title -like "*$($Hostname)*" }
+		}
+
+		return $RepairTickets_Filtered;
+	}
+
 	# Checks the log history to see if something has been attempted more than 5 times
 	# and attempts have been made for the past 2 weeks
 	# If so, an email is sent if one hasn't already been sent in the last 2 weeks, and the email is logged
@@ -1836,7 +1873,15 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		$TwoWeeksAgo = [int](New-TimeSpan -Start (Get-Date "01/01/1970") -End (Get-Date).AddDays(-14).ToUniversalTime()).TotalSeconds
 		$TenDays = [int](New-TimeSpan -Start (Get-Date).AddDays(-10).ToUniversalTime() -End (Get-Date).ToUniversalTime()).TotalSeconds
 
-		# first check if an email was sent about this in the last 2 weeks
+		# first check if a repair ticket already exists for this device/service
+		if ($ServiceTarget -in ("rmm", "sc", "sophos")) {
+			$RepairTickets_Filtered = repair_tickets -ServiceTarget $ServiceTarget -Hostname $Hostname
+			if (($RepairTickets_Filtered | Measure-Object).count -gt 0) {
+				break;
+			}
+		}
+
+		# next check if an email was sent about this in the last 2 weeks
 		if ($ChangeType) {
 			$EmailChangeType = $ChangeType + "-email"
 		}
@@ -2825,8 +2870,13 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 								}
 							}
 						}
+						
+						$RepairTickets_Subset = @()
+						if ($DeviceType -in @("rmm", "sc", "sophos")) {
+							$RepairTickets_Subset = repair_tickets -ServiceTarget $DeviceType -Hostname $Hostname
+						}
 
-						if (!$AutoFix -and $Device.id -notin $MoveDevices.ID -and $Timespan.Days -le 7) {
+						if (!$AutoFix -and $Device.id -notin $MoveDevices.ID -and $Timespan.Days -le 7 -and ($RepairTickets_Subset | Measure-Object).Count -eq 0) {
 							$SendEmail = $true
 						}
 
@@ -2838,6 +2888,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 							SC_Time = if ($ActivityComparison.sc) { $ActivityComparison.sc[0].last_active } else { "NA" }
 							RMM_Time = if ($ActivityComparison.rmm) { $ActivityComparison.rmm[0].last_active } else { "NA" }
 							Sophos_Time = if ($ActivityComparison.sophos) { $ActivityComparison.sophos[0].last_active } else { "NA" }
+							RepairTicket = if (($RepairTickets_Subset | Measure-Object).Count -gt 0) { $RepairTickets_Subset.ticketNumber -join ", " } else { "NA" }
 							Link = $Link
 						}
 					}
@@ -2868,7 +2919,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				# send an email
 				$EmailSubject = "Device Audit on $Company_Acronym - Devices Found with a broken connection"
 				$EmailIntro = "Devices with a broken connection were found. Auto-fixes have been attempted where possible. Please review:"
-				$DeviceTable = @($MissingConnections) | ConvertTo-HTML -Fragment -As Table | Out-String
+				$DeviceTable = @($BrokenConnections) | ConvertTo-HTML -Fragment -As Table | Out-String
 
 				$HTMLEmail = $EmailTemplate -f `
 								$EmailIntro, 
@@ -3055,7 +3106,14 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						}
 					}
 
-					if (!$AutoFix -and $Device.id -notin $MoveDevices.ID -and $Timespan.Days -le 7) {
+					$RepairTickets_Subset = @()
+					$MissingTypes | ForEach-Object {
+						if ($_ -in @("rmm", "sc", "sophos")) {
+							$RepairTickets_Subset += repair_tickets -ServiceTarget $_ -Hostname $Hostnames
+						}
+					}					
+
+					if (!$AutoFix -and $Device.id -notin $MoveDevices.ID -and $Timespan.Days -le 7 -and ($RepairTickets_Subset | Measure-Object).Count -eq 0) {
 						$SendEmail = $true
 					}
 
@@ -3067,6 +3125,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						InRMM = if ($RMMDeviceIDs) { "Yes" }  elseif (ignore_install -Device $Device -System 'rmm') { "Ignore" } else { "No" }
 						InSophos = if ($SophosDeviceIDs) { "Yes" } elseif ($RMMAntivirus -and $RMMAntivirus -like "Sophos*") { "Yes, missing from portal" } elseif (ignore_install -Device $Device -System 'sophos') { "Ignore" } else { "No" }
 						AutoFix_Attempted = $AutoFix
+						RepairTicket = if (($RepairTickets_Subset | Measure-Object).Count -gt 0) { $RepairTickets_Subset.ticketNumber -join ", " } else { "NA" }
 						SC_Link = $SCLink
 						RMM_Link = $RMMLink
 						Sophos_Link = $SophosLink
