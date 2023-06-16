@@ -711,11 +711,19 @@ foreach ($MatchedDevice in $MatchedDevices) {
 			if (!$Related_RMMDevices) {
 				if ($Device.Name.Trim()) {
 					$EscapedName = $Device.Name.replace("[", "````[").replace("]", "````]")
-					$Related_RMMDevices += $RMM_Devices | Where-Object { $_."Device Description" -like "*$($EscapedName)*" -and $_."Device UID" -notin $IgnoreRMM }
+					if ($EscapedName -notlike "MacBook-Pro*") {
+						$Related_RMMDevices += $RMM_Devices | Where-Object { $_."Device Description" -like "*$($EscapedName)*" -and $_."Device UID" -notin $IgnoreRMM }
+					}
 				}
 				if ($Device.GuestMachineName.Trim()) {
 					$EscapedName2 = $Device.GuestMachineName.replace("[", "````[").replace("]", "````]")
-					$Related_RMMDevices += $RMM_Devices | Where-Object { $_."Device Description" -like "*$($EscapedName2)*" -and $_."Device UID" -notin $IgnoreRMM }
+					if ($EscapedName2 -notlike "MacBook-Pro*") {
+						$Related_RMMDevices += $RMM_Devices | Where-Object { $_."Device Description" -like "*$($EscapedName2)*" -and $_."Device UID" -notin $IgnoreRMM }
+					}
+				}
+				if (($Related_RMMDevices | Measure-Object).Count -gt 4) {
+					# Sanity check in case the name of the device is a little too generic and we get a ton of matches
+					$Related_RMMDevices = @()
 				}
 			}
 			if (!$Related_RMMDevices -and $Device.GuestMachineDescription.Trim() -and $Device.GuestMachineDescription.length -gt 5 -and $Device.GuestMachineDescription -like "*-*" -and $Device.GuestMachineDescription.Trim() -notlike "* *") {
