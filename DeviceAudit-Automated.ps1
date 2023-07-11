@@ -335,8 +335,12 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	# Connect to JumpCloud (if applicable)
 	$JCConnected = $false
 	if ($JumpCloudAPIKey -and $JumpCloudAPIKey.Key) {
-		Connect-JCOnline -JumpCloudApiKey $JumpCloudAPIKey.Key -Force
-		$JCConnected = $true
+		try {
+			Connect-JCOnline -JumpCloudApiKey $JumpCloudAPIKey.Key -Force
+			$JCConnected = $true
+		} catch {
+			$JCConnected = $false
+		}
 	}
 
 	if ($Sophos_Company) {
