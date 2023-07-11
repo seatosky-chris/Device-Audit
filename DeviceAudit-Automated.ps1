@@ -336,7 +336,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	$JCConnected = $false
 	if ($JumpCloudAPIKey -and $JumpCloudAPIKey.Key) {
 		try {
-			Connect-JCOnline -JumpCloudApiKey $JumpCloudAPIKey.Key -Force
+			Connect-JCOnline -JumpCloudApiKey $JumpCloudAPIKey.Key -Force -ErrorAction Stop
 			$JCConnected = $true
 		} catch {
 			$JCConnected = $false
@@ -548,6 +548,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	# Get all devices from JumpCloud
 	$JC_Devices = @()
 	if ($JCConnected) {
+		Write-Host "Getting JC System"
 		$JC_Devices = Get-JCSystem
 	}
 	$JC_DevicesHash = @{}
@@ -557,6 +558,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 	$JC_Users = @()
 	if (($JC_Devices | Measure-Object).Count -gt 0) {
+		Write-Host "Getting JC Users"
 		foreach ($Device in $JC_Devices) {
 			$UserInfo = Get-JCSystemUser -SystemID $Device.id
 			if ($UserInfo) {
