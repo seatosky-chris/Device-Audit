@@ -45,6 +45,15 @@ $LANFlexAssetName = "LAN"
 $OverviewFlexAssetName = "Custom Overview"
 
 ####################
+# $BillingFlexAssetName
+#
+# The ITG flexible asset name for Customer Billing info
+#
+# Example: $BillingFlexAssetName = "Customer Billing"
+#
+$BillingFlexAssetName = "Customer Billing"
+
+####################
 # $ScriptsLastRunFlexAssetName
 #
 # The ITG flexible asset name for the "Scripts - Last Run" asset

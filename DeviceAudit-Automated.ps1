@@ -5438,6 +5438,8 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			$Year = Get-Date -Format yyyy
 			$FileName = "$($Company_Acronym)--Device_List--$($MonthName)_$Year.xlsx"
 			$Path = $PSScriptRoot + "\$FileName"
+			$BillingDeviceFileName = $FileName
+			$BillingDeviceList = $Path
 			Remove-Item $Path -ErrorAction SilentlyContinue
 
 			$BillingDevices | Sort-Object -Property DeviceType, Hostname | 
@@ -5524,6 +5526,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 			# If the script is set to send billing update emails, check if the count changed and send an email if so 
 			# (only send during last week of the month and if we haven't already sent an email in the last 10 days)
+			# Also update the ITG Customer Billing page
 			if ($SendBillingEmails -and $HistoryLocation -and $Now.Day -gt $LastWeek -and ($History_Subset_Emails | Measure-Object).count -eq 0) {
 				# First get the history file if it exists to perform a diff
 				$Month = Get-Date -Format "MM"
@@ -5659,6 +5662,155 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 					# log the sent email
 					log_change -Company_Acronym $Company_Acronym -ServiceTarget 'email' -RMM_Device_ID "" -SC_Device_ID "" -Sophos_Device_ID "" -ChangeType $EmailChangeType -Hostname "" -Reason $EmailReason
+				}
+				
+				#######
+				### Update ITG Customer Billing page
+				#######
+
+				# Get the info for the fields
+				$TotalBilled = ($FullDeviceCounts.BilledCount | Measure-Object -Sum).Sum
+				$TotalUnbilled = ($FullDeviceCounts.UnBilledCount | Measure-Object -Sum).Sum
+				
+				$DeviceBreakdownTable = "
+					<h1>Device Counts</h1>
+					<table class='table table-striped'>
+						<thead>
+							<tr>
+							<th>Type</th>
+							<th>Billed</th>
+							<th>Unbilled</th>
+							</tr>
+						</thead>
+						<tbody>"
+
+				foreach ($DeviceType in $FullDeviceCounts) {
+					$DeviceBreakdownTable += "
+						<tr>
+							<th>$($DeviceType.Type)</th>
+							<td>$($DeviceType.BilledCount)</td>
+							<td>$($DeviceType.UnBilledCount)</td>
+						</tr>"
+				}
+				$DeviceBreakdownTable += "
+						<tr style='background-color: #e9e9e9'>
+							<th style='background-color: #e9e9e9'><u>Totals</u></th>
+							<td><strong><u>$TotalBilled</u></strong></td>
+							<td><strong><u>$TotalUnbilled</u><strong></td>
+						</tr>"
+				$DeviceBreakdownTable += "
+						</tbody>
+					</table>
+					<br />
+					<h1>Server Breakdown</h1>
+					<table class='table table-striped'>
+						<thead>
+						<tr>
+						<th>Type</th>
+						<th>Count</th>
+						</tr>
+					</thead>
+					<tbody>"
+				
+				foreach ($ServerType in $ServerCounts) {
+					$DeviceBreakdownTable += "
+						<tr>
+							<th>$($ServerType.Type)</th>
+							<td>$($ServerType.Count)</td>
+						</tr>"
+				}	
+				$DeviceBreakdownTable += "
+						</tbody>
+					</table>"
+
+				$ReportEncoded = [System.Convert]::ToBase64String([IO.File]::ReadAllBytes($BillingDeviceList))
+
+				# Get the existing info if it exists (anything that isn't updated will just get deleted, not left alone)
+				$BillingFilterID = (Get-ITGlueFlexibleAssetTypes -filter_name $BillingFlexAssetName).data
+				if ($BillingFilterID) {
+					$FlexAssetBody 	= 
+					@{
+						type 		= 'flexible-assets'
+						attributes	= @{
+							traits	= @{
+
+							}
+						}
+					}
+					
+					$ExistingFlexAsset = Get-ITGlueFlexibleAssets -filter_flexible_asset_type_id $BillingFilterID.id -filter_organization_id $ITG_ID -include attachments
+					$ExistingFlexAsset.data = $ExistingFlexAsset.data | Select-Object -First 1
+
+					if ($ExistingFlexAsset -and $ExistingFlexAsset.data.attributes.traits) {
+						$ExistingFlexAsset.data.attributes.traits.PSObject.Properties | ForEach-Object {
+							if ($_.name -eq "billing-report-user-list" -or $_.name -eq "billing-report-device-list") {
+								return
+							}
+							$property = $_.name
+							$FlexAssetBody.attributes.traits.$property = $_.value
+						}
+					}
+
+					# Add the new data to be uploaded
+					$FlexAssetBody.attributes.traits."billed-by" = "Computer"
+					$FlexAssetBody.attributes.traits."number-of-billed-computers" = ($FullDeviceCounts | Where-Object { $_.Type -eq "Workstations" }).UnBilledCount
+					$FlexAssetBody.attributes.traits."number-of-billed-servers" = ($FullDeviceCounts | Where-Object { $_.Type -eq "Servers" }).BilledCount
+					$FlexAssetBody.attributes.traits."device-breakdown" = $DeviceBreakdownTable
+					$FlexAssetBody.attributes.traits.Remove("number-of-billed-users")
+					$FlexAssetBody.attributes.traits.Remove("user-breakdown")
+					$FlexAssetBody.attributes.traits."billing-report-device-list" = @{
+						content 	= $ReportEncoded
+						file_name 	= $BillingDeviceFileName
+					}
+
+					# If billing report is already an attachment, delete so we can replace it
+					if ($ExistingFlexAsset -and $ExistingFlexAsset.data.id -and $ExistingFlexAsset.included) {
+						$Attachments = $ExistingFlexAsset.included | Where-Object {$_.type -eq 'attachments'}
+						if ($Attachments -and ($Attachments | Measure-Object).Count -gt 0 -and $Attachments.attributes) {
+							$MonthsAttachment = $Attachments.attributes | Where-Object { $_.name -like $BillingDeviceFileName + '*' -or $_."attachment-file-name" -like $BillingDeviceFileName + '*' }
+							if ($MonthsAttachment) {
+								$data = @{ 
+									'type' = 'attachments'
+									'attributes' = @{
+										'id' = $MonthsAttachment.id
+									}
+								}
+								Remove-ITGlueAttachments -resource_type 'flexible_assets' -resource_id $ExistingFlexAsset.data.id -data $data | Out-Null
+							}
+						}
+					}
+
+					# Upload
+					if ($ExistingFlexAsset -and $ExistingFlexAsset.data.id) {
+						Set-ITGlueFlexibleAssets -id $ExistingFlexAsset.data.id -data $FlexAssetBody | Out-Null
+						Write-Host "Updated existing $BillingFlexAssetName asset."
+						Write-PSFMessage -Level Verbose -Message "Updated existing: $BillingFlexAssetName asset"
+					} else {
+						$FlexAssetBody.attributes."organization-id" = $ITG_ID
+						$FlexAssetBody.attributes."flexible-asset-type-id" = $BillingFilterID.id
+						$FlexAssetBody.attributes.traits."billed-by" = "Computer"
+						$ExistingFlexAsset = New-ITGlueFlexibleAssets -data $FlexAssetBody
+						Write-Host "Uploaded a new $BillingFlexAssetName asset."
+						Write-PSFMessage -Level Verbose -Message "Uploaded new: $BillingFlexAssetName asset"
+					}
+
+					if ($ExistingFlexAsset -and $ExistingFlexAsset.data.id) {
+						$data = @{ 
+							'type' = 'attachments'
+							'attributes' = @{
+								'attachment' = @{
+									'content' = $ReportEncoded
+									'file_name'	= $BillingDeviceFileName
+								}
+							}
+						}
+						New-ITGlueAttachments -resource_type 'flexible_assets' -resource_id $ExistingFlexAsset.data.id -data $data | Out-Null
+						Write-Host "Billing report uploaded and attached." -ForegroundColor Green
+						Write-PSFMessage -Level Verbose -Message "Uploaded: Billing report"
+					}
+				} else {
+					Write-Host "Something went wrong when trying to find the $BillingFlexAssetName asset type. Could not update IT Glue." -ForegroundColor Red
+					Write-PSFMessage -Level Warning -Message "Error. Could not get ID of asset type: $BillingFlexAssetName"
 				}
 			}
 
