@@ -1494,7 +1494,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			if (($RelatedDevices | Measure-Object).Count -gt 0) {
 				foreach ($MatchedDevice in $RelatedDevices) {
 					$MatchedDevice.jc_matches += @($Device.id)
-					$MatchedDevice.jc_hostname += @($Device.hostname)
+					$MatchedDevice.jc_hostname += @(if ($Device.hostname) { $Device.hostname } else { $Device.displayName })
 				}
 			}
 		}
@@ -1518,7 +1518,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				autotask_matches = @()
 				autotask_hostname = @()
 				jc_matches = @($Device.id)
-				jc_hostname = @($Device.hostname)
+				jc_hostname = @(if ($Device.hostname) { $Device.hostname } else { $Device.displayName })
 				azure_matches = @()
 				azure_hostname = @()
 				azure_match_warning = @()
@@ -1794,8 +1794,8 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	}
 
 	# Function for logging automated changes (installs, deletions, etc.)
-	# $ServiceTarget is 'rmm', 'sc', 'sophos', 'itg', or 'autotask'
-	function log_change($Company_Acronym, $ServiceTarget, $RMM_Device_ID, $SC_Device_ID, $Sophos_Device_ID, $ChangeType, $Hostname = "", $Reason = "") {
+	# $ServiceTarget is 'rmm', 'sc', 'sophos', 'jc', 'itg', or 'autotask'
+	function log_change($Company_Acronym, $ServiceTarget, $RMM_Device_ID, $SC_Device_ID, $Sophos_Device_ID, $JC_Device_ID = $false, $ChangeType, $Hostname = "", $Reason = "") {
 		if (!$LogLocation) {
 			return $false
 		}
@@ -1818,6 +1818,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			rmm_id = $RMM_Device_ID
 			sc_id = $SC_Device_ID
 			sophos_id = $Sophos_Device_ID
+			jc_id = $JC_Device_ID
 			service_target = $ServiceTarget
 			change = $ChangeType
 			hostname = $Hostname
@@ -2104,6 +2105,32 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		return
 	}
 
+	function compare_activity_jc($DeviceIDs) {
+		$JCDevices = @()
+		foreach ($DeviceID in $DeviceIDs) {
+			$JCDevices += $JC_DevicesHash[$DeviceID]
+		}
+		$DevicesOutput = @()
+
+		foreach ($Device in $JCDevices) {
+			$DeviceOutputObj = [PsCustomObject]@{
+				type = "jc"
+				id = $Device.id
+				last_active = $null
+			}
+
+			if ($Device.lastContact -and [string]$Device.lastContact -as [DateTime]) {
+				$DeviceOutputObj.last_active = [DateTime]$Device.lastContact
+				$DevicesOutput += $DeviceOutputObj
+			}
+		}
+
+		$DevicesOutput = $DevicesOutput | Sort-Object last_active -Desc
+
+		$DevicesOutput
+		return
+	}
+
 	function compare_activity_azure($DeviceIDs) {
 		$AzureDevices = @()
 		foreach ($DeviceID in $DeviceIDs) {
@@ -2173,6 +2200,11 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		if ($MatchedDevice.sophos_matches -and $MatchedDevice.sophos_matches.count -gt 0) {
 			$SophosActivity = compare_activity_sophos $MatchedDevice.sophos_matches
 			$Activity.sophos = $SophosActivity | Sort-Object last_active -Descending | Select-Object -First 1
+		}
+
+		if ($JCConnected -and $MatchedDevice.jc_matches -and $MatchedDevice.jc_matches.count -gt 0) {
+			$JCActivity = compare_activity_jc $MatchedDevice.jc_matches
+			$Activity.jc = $JCActivity | Sort-Object last_active -Descending | Select-Object -First 1
 		}
 
 		if ($MatchedDevice.azure_matches -and $MatchedDevice.azure_matches.count -gt 0) {
@@ -2263,6 +2295,21 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			}
 		}
 		return $false
+	}
+
+	# Deletes a device from JumpCloud
+	function delete_from_jc($JC_ID) {
+		$Deleted = $false
+		if ($JC_ID) {
+			$Deleted = Remove-JCSystem -SystemID $JC_ID -Force
+		}
+
+		if ($Deleted -and $Deleted.Results -like "Deleted") {
+			return $true
+		} else {
+			Write-Warning "Could not delete device '$($JC_ID)' from JumpCloud."
+			return $false
+		}
 	}
 
 	# Archives a configuration in ITG
@@ -2393,7 +2440,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		Write-Host "Searching for duplicates..."
 		$Duplicates = @()
 		foreach ($Device in $MatchedDevices) {
-			if ($Device.sc_matches.count -gt 1 -or $Device.rmm_matches.count -gt 1 <# -or $Device.sophos_matches.count -gt 1 #>) { 
+			if ($Device.sc_matches.count -gt 1 -or $Device.rmm_matches.count -gt 1 <# -or $Device.sophos_matches.count -gt 1 #> -or ($JCConnected -and $Device.jc_matches.count -gt 1)) { 
 				$Duplicates += $Device
 			}
 		}
@@ -2486,6 +2533,36 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						$i++
 					}
 				} #>
+
+				# JumpCloud
+				if ($JCConnected -and $Device.jc_matches.count -gt 1) {
+					$OrderedDevices = compare_activity_jc($Device.jc_matches)
+					$i = 0
+					foreach ($OrderedDevice in $OrderedDevices) {
+						$JCDevice = $JC_DevicesHash[$OrderedDevice.id]
+						$Deleted = $false
+						$AllowDeletion = $true
+						if ($DontAutoDelete -and (($JCDevice.hostname -and $DontAutoDelete.Hostnames -contains $JCDevice.hostname) -or $DontAutoDelete.Hostnames -contains $JCDevice.displayName -or ($JCDevice.hostname -and $DontAutoDelete.JC -contains $JCDevice.hostname) -or $DontAutoDelete.JC -contains $JCDevice.displayName -or $DontAutoDelete.JC -contains $OrderedDevice.id)) {
+							$AllowDeletion = $false
+						}
+						if ($i -gt 0 -and !$ReadOnly -and $AllowDeletion) {
+							$Deleted = delete_from_jc -JC_ID $OrderedDevice.id
+							if ($Deleted) {
+								log_change -Company_Acronym $Company_Acronym -ServiceTarget "jc" -RMM_Device_ID $Device.rmm_matches -SC_Device_ID $OrderedDevice.id -Sophos_Device_ID $Device.sophos_matches -JC_Device_ID $Device.jc_matches -ChangeType "delete" -Hostname if ($JCDevice.hostname) { $JCDevice.hostname } else { $JCDevice.displayName } -Reason "Duplicate"
+							}
+						}
+						$DuplicatesTable += [PsCustomObject]@{
+							type = "JC"
+							hostname = if ($JCDevice.hostname) { $JCDevice.hostname } else { $JCDevice.displayName }
+							id = $OrderedDevice.id 
+							last_active = $OrderedDevice.last_active
+							remove = if ($i -eq 0) { "No" } else { "Yes" }
+							auto_deleted = $Deleted
+							link = "https://console.jumpcloud.com/#/devices/$($JCDevice.id)/details"
+						}
+						$i++
+					}
+				}
 			}
 
 			Write-Host "Warning! Duplicates were found!" -ForegroundColor Red
@@ -2529,6 +2606,18 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					foreach ($MDevice in $MatchedDevice) {
 						$MDevice.sophos_matches = $MatchedDevice.sophos_matches | Where-Object { $_ -ne $Device.id }
 						$MDevice.sophos_hostname = @($SophosDevices.hostname)
+					}
+				}
+
+				if ($Device.type -eq "JC") {
+					$MatchedDevice = $MatchedDevices | Where-Object { $Device.id -in $_.jc_matches }
+					$JCDevices = @()
+					foreach ($DeviceID in $MatchedDevice.jc_matches) {
+						$JCDevices += $JC_DevicesHash[$DeviceID]
+					}
+					foreach ($MDevice in $MatchedDevice) {
+						$MDevice.jc_matches = $MatchedDevice.jc_matches | Where-Object { $_ -ne $Device.id }
+						$MDevice.jc_hostname = @($JCDevices | Foreach-Object { if ($_.hostname) { $_.hostname } else { $_.displayName } })
 					}
 				}
 			}
@@ -3266,6 +3355,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					$SCDeviceID = if ($ActivityComparison.sc) { $ActivityComparison.sc[0].id } else { $false }
 					$RMMDeviceID = if ($ActivityComparison.rmm) { $ActivityComparison.rmm[0].id } else { $false }
 					$SophosDeviceID = if ($ActivityComparison.sophos) { $ActivityComparison.sophos[0].id } else { $false }
+					$JCDeviceID = $false
+					if ($JCConnected) {
+						$JCDeviceID = if ($ActivityComparison.jc) { $ActivityComparison.jc[0].id } else { $false }
+					}
 					$ITG_IDs = $Device.itg_matches
 
 					$User = $false
@@ -3304,11 +3397,24 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 							$OperatingSystem = $SophosDevice.OS
 						}
 					}
+					if ($JCDeviceID) {
+						$JCDevice = $JC_DevicesHash[$JCDeviceID]
+						$Hostnames += if ($JCDevice.hostname) { $JCDevice.hostname -replace ".local", "" } else { $JCDevice.displayName }
+						if (!$User) {
+							if ($JC_Users) {
+								$User = $JC_Users | Where-Object { $_.SystemID -eq $JCDevice.id } | Select-Object -Property Username -ExpandProperty Username
+							}
+						}
+						if (!$OperatingSystem) {
+							$OperatingSystem = "$($JCDevice.os) $($JCDevice.version)"
+						}
+					}
 					$Hostnames = $HostNames | Sort-Object -Unique
 
 					$SCLink = ''
 					$RMMLink = ''
 					$SophosLink = ''
+					$JCLink = ''
 					if ($SCDeviceID) {
 						$SCLink = "$($SCLogin.URL)/Host#Access/All%20Machines/$($SCDevice.Name)/$($SCDeviceID)"
 					}
@@ -3321,6 +3427,9 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					}
 					if ($SophosDeviceID) {
 						$SophosLink = "https://cloud.sophos.com/manage/devices/computers/$($SophosDevice.webID)"
+					}
+					if ($JCDeviceID) {
+						$JCLink = "https://console.jumpcloud.com/#/devices/$($JCDevice.id)/details"
 					}
 					$RMMAntivirus = $false
 					if (!$SophosDeviceID -and $RMMDeviceID) {
@@ -3376,6 +3485,22 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						} #>
 					}
 
+					$DeleteJC = "No"
+					if ($JCDeviceID -and !$RMMOnly) {
+						$DeleteJC = "Yes, manually delete"
+						$AllowDeletion = $true
+						if ($DontAutoDelete -and (($JCDevice.hostname -and $DontAutoDelete.Hostnames -contains $JCDevice.hostname) -or $DontAutoDelete.Hostnames -contains $JCDevice.displayName -or ($JCDevice.hostname -and $DontAutoDelete.JC -contains $JCDevice.hostname) -or $DontAutoDelete.JC -contains $JCDevice.displayName -or $DontAutoDelete.JC -contains $OrderedDevice.id)) {
+							$AllowDeletion = $false
+						}
+						if (!$ReadOnly -and $AllowDeletion) {
+							$Deleted = delete_from_jc -JC_ID $JCDeviceID
+							if ($Deleted) {
+								$DeleteJC = "Yes, auto attempted"
+								log_change -Company_Acronym $Company_Acronym -ServiceTarget "jc" -RMM_Device_ID $Device.rmm_matches -SC_Device_ID $Device.sc_matches -Sophos_Device_ID $Device.sophos_matches -JC_Device_ID $JCDeviceID -ChangeType "delete" -Hostname if ($JCDevice.hostname) { $JCDevice.hostname } else { $JCDevice.displayName } -Reason "Inactive"
+							}
+						}
+					}
+
 					$DeleteITG = "No"
 					if ($ITGConnected -and $ITG_IDs -and !$RMMOnly) {
 						if (!$ReadOnly) {
@@ -3391,7 +3516,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					}
 
 
-					$InactiveDevices += [PsCustomObject]@{
+					$InactiveDeviceInfo = [PsCustomObject]@{
 						Hostnames = $Hostnames -join ', '
 						LastActive = $NewestDate
 						User = $User
@@ -3401,17 +3526,30 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						InSC = if ($SCDeviceID -and !$RMMOnly) { "Yes" } elseif ($SCDeviceID) { "Yes, but don't delete yet" } else { "No" }
 						InRMM = if ($RMMDeviceID) { "Yes" } else { "No" }
 						InSophos = if ($SophosDeviceID -and !$RMMOnly) { "Yes" } elseif ($SophosDeviceID) { "Yes, but don't delete yet" } elseif ($RMMAntivirus -and $RMMAntivirus -like "Sophos*") { "Yes, missing from portal" } else { "No" }
+						InJC = if ($JCDeviceID -and !$RMMOnly) { "Yes" } elseif ($JCDeviceID) { "Yes, but don't delete yet" } else { "No" }
 						DeleteSC = $DeleteSC
 						DeleteRMM = $DeleteRMM
 						DeleteSophos = $DeleteSophos
+						DeleteJC = $DeleteJC
 						ArchiveITG = $DeleteITG
 						SC_Time = if ($ActivityComparison.sc) { $ActivityComparison.sc[0].last_active } else { "NA" }
 						RMM_Time = if ($ActivityComparison.rmm) { $ActivityComparison.rmm[0].last_active } else { "NA" }
 						Sophos_Time = if ($ActivityComparison.sophos) { $ActivityComparison.sophos[0].last_active } else { "NA" }
+						JC_Time = if ($JCConnected -and $ActivityComparison.jc) { $ActivityComparison.jc[0].last_active } else { "NA" }
 						SC_Link = $SCLink
 						RMM_Link = $RMMLink
 						Sophos_Link = $SophosLink
+						JC_Link = $JCLink
 					}
+
+					if (!$JCConnected) {
+						$InactiveDeviceInfo.PSObject.Properties.Remove('InJC');
+						$InactiveDeviceInfo.PSObject.Properties.Remove('DeleteJC');
+						$InactiveDeviceInfo.PSObject.Properties.Remove('JC_Time');
+						$InactiveDeviceInfo.PSObject.Properties.Remove('JC_Link');
+					}
+
+					$InactiveDevices += $InactiveDeviceInfo
 				}
 			}
 		}
