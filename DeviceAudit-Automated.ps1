@@ -1498,6 +1498,34 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				}
 			}
 		}
+
+		# Add any missing JC devices that no matches were found for
+		foreach ($Device in $JC_Devices) {
+			if ($Device.id -in $MatchedDevices.jc_matches) {
+				continue
+			}
+
+			$MatchedDevices += [PsCustomObject]@{
+				id = New-Guid
+				sc_matches = @()
+				sc_hostname = @()
+				rmm_matches = @()
+				rmm_hostname = @()
+				sophos_matches = @()
+				sophos_hostname = @()
+				itg_matches = @()
+				itg_hostname = @()
+				autotask_matches = @()
+				autotask_hostname = @()
+				jc_matches = @($Device.id)
+				jc_hostname = @($Device.hostname)
+				azure_matches = @()
+				azure_hostname = @()
+				azure_match_warning = @()
+				intune_matches = @()
+				intune_hostname = @()
+			}
+		}
 	}
 
 	# Match devices to Intune
