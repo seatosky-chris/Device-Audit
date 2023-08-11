@@ -8,6 +8,7 @@ DeviceUsers/
 SophosTamperKeys/
 CPUData/
 MatchedDevices/
+RMMDeviceDetails/
 Config Files/*
 Config Files/Archive
 *.lnk

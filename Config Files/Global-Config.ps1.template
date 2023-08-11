@@ -226,6 +226,15 @@ $MoveOverview = @{
 $MatchedDevicesLocation = "C:\Users\Administrator\Documents\DeviceAuditMatchedDevices"
 
 ####################
+# $RMMDetailsLocation
+#
+# The location to store RMM Device Details (we have to query this on a per device basis the info we need rarely changes, refreshes weekly)
+#
+# Example: $RMMDeviceDetailsLocation = "C:\Users\Administrator\Documents\RMMDeviceDetails"
+#
+$RMMDeviceDetailsLocation = "C:\Users\Administrator\Documents\RMMDeviceDetails"
+
+####################
 # $HistoryLocation
 #
 # The location to store history files of the device audit (can be used by other scripts to get usage stats, who uses which computer, etc.)

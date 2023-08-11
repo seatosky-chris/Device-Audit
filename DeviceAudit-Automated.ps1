@@ -465,6 +465,17 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 	# Get RMM device details if using the API
 	if ($RMM_Devices) {
+		if (!(Test-Path -Path $RMMDeviceDetailsLocation)) {
+			New-Item -ItemType Directory -Force -Path $RMMDeviceDetailsLocation | Out-Null
+		}
+		
+		$RMMDeviceDetailsPath = "$($RMMDeviceDetailsLocation)\$($Company_Acronym)_rmm_device_details.json"
+		$RMMDeviceDetailsCache = @{}
+		if (Test-Path $RMMDeviceDetailsPath) {
+			$RMMDeviceDetailsCache = Get-Content -Path $RMMDeviceDetailsPath -Raw | ConvertFrom-Json
+		}
+
+		$CurrentDate = Get-Date
 		$i = 0
 		foreach ($Device in $RMM_Devices) {
 			$i++
@@ -479,17 +490,41 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			$Device | Add-Member -NotePropertyName cpuCores -NotePropertyValue $false
 			$Device | Add-Member -NotePropertyName url -NotePropertyValue $false
 
-			$AuditDevice = Get-DrmmAuditDevice $Device.uid
-			if ($AuditDevice) {
-				$Device.serialNumber = $AuditDevice.bios.serialNumber
-				$Device.manufacturer = $AuditDevice.systemInfo.manufacturer
-				$Device.model = $AuditDevice.systemInfo.model
-				$Device.MacAddresses = @($AuditDevice.nics | Where-Object { $Nic = $_; $_.macAddress -and ($NetworkAdapterBlacklist | Where-Object { $Nic.instance -like $_ }).Count -eq 0 } | Select-Object instance, macAddress)
-				$Device.memory = $AuditDevice.systemInfo.totalPhysicalMemory
-				$Device.cpus = $AuditDevice.processors
-				$Device.cpuCores = $AuditDevice.systemInfo.totalCpuCores
-				$Device.url = $AuditDevice.portalUrl
+			$LoadFromCache = $false
+			if ($RMMDeviceDetailsCache.($Device.uid)) {
+				$CacheAge = New-TimeSpan -Start (Get-Date $RMMDeviceDetailsCache.($Device.uid).lastUpdated) -End $CurrentDate
+				if ($CacheAge.Days -ge 7) {
+					# Remove cache entry
+				} else {
+					$LoadFromCache = $true
+				}
 			}
+
+			if (!$LoadFromCache) {
+				$AuditDevice = Get-DrmmAuditDevice $Device.uid
+				$RMMDeviceDetailsCache.($Device.uid) = $AuditDevice
+				if (!$RMMDeviceDetailsCache.($Device.uid).lastUpdated) {
+					$RMMDeviceDetailsCache.($Device.uid) | Add-Member -NotePropertyName lastUpdated -NotePropertyValue $false
+				}
+				$RMMDeviceDetailsCache.($Device.uid).lastUpdated = $CurrentDate
+			} else {
+				$CachedDevice = $RMMDeviceDetailsCache.($Device.uid)
+			}
+			if ($LoadFromCache -or $AuditDevice) {
+				$Nics = if ($LoadFromCache) { $CachedDevice.nics } else { $AuditDevice.nics }
+				$Device.serialNumber = if ($LoadFromCache) { $CachedDevice.bios.serialNumber } else { $AuditDevice.bios.serialNumber }
+				$Device.manufacturer = if ($LoadFromCache) { $CachedDevice.systemInfo.manufacturer } else { $AuditDevice.systemInfo.manufacturer }
+				$Device.model = if ($LoadFromCache) { $CachedDevice.systemInfo.model } else { $AuditDevice.systemInfo.model }
+				$Device.MacAddresses = @($Nics | Where-Object { $Nic = $_; $_.macAddress -and ($NetworkAdapterBlacklist | Where-Object { $Nic.instance -like $_ }).Count -eq 0 } | Select-Object instance, macAddress)
+				$Device.memory = if ($LoadFromCache) { $CachedDevice.systemInfo.totalPhysicalMemory } else { $AuditDevice.systemInfo.totalPhysicalMemory }
+				$Device.cpus = if ($LoadFromCache) { $CachedDevice.processors } else { $AuditDevice.processors }
+				$Device.cpuCores = if ($LoadFromCache) { $CachedDevice.systemInfo.totalCpuCores } else { $AuditDevice.systemInfo.totalCpuCores }
+				$Device.url = if ($LoadFromCache) { $CachedDevice.portalUrl } else { $AuditDevice.portalUrl }
+			}
+		}
+
+		if ($RMMDeviceDetailsCache -and $RMMDeviceDetailsPath) {
+			$RMMDeviceDetailsCache | ConvertTo-Json -Depth 8 | Out-File -FilePath $RMMDeviceDetailsPath
 		}
 		Write-Progress -Activity "Getting RMM device details" -Status "Ready" -Completed
 	}
