@@ -2603,6 +2603,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			Write-Host "Warning! Duplicates were found!" -ForegroundColor Red
 
 			# Now remove duplicates from $MatchedDevices as we can ignore them for the rest of this script
+			$UpdatedMatchedDevices = $false
 			foreach ($Device in $DuplicatesTable) {
 				if ($Device.Remove -eq "No") {
 					continue
@@ -2618,6 +2619,9 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						$MDevice.sc_matches = $MatchedDevice.sc_matches | Where-Object { $_ -ne $Device.id }
 						$MDevice.sc_hostname = @($SCDevices.Name)
 					}
+					if (($MatchedDevice | Measure-Object).Count -gt 0) {
+						$UpdatedMatchedDevices = $true
+					}
 				}
 
 				if ($Device.type -eq "RMM") {
@@ -2629,6 +2633,9 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					foreach ($MDevice in $MatchedDevice) {
 						$MDevice.rmm_matches = $MatchedDevice.rmm_matches | Where-Object { $_ -ne $Device.id }
 						$MDevice.rmm_hostname = @($RMMDevices."Device Hostname")
+					}
+					if (($MatchedDevice | Measure-Object).Count -gt 0) {
+						$UpdatedMatchedDevices = $true
 					}
 				}
 
@@ -2642,6 +2649,9 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						$MDevice.sophos_matches = $MatchedDevice.sophos_matches | Where-Object { $_ -ne $Device.id }
 						$MDevice.sophos_hostname = @($SophosDevices.hostname)
 					}
+					if (($MatchedDevice | Measure-Object).Count -gt 0) {
+						$UpdatedMatchedDevices = $true
+					}
 				}
 
 				if ($Device.type -eq "JC") {
@@ -2654,7 +2664,15 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						$MDevice.jc_matches = $MatchedDevice.jc_matches | Where-Object { $_ -ne $Device.id }
 						$MDevice.jc_hostname = @($JCDevices | Foreach-Object { if ($_.hostname) { $_.hostname } else { $_.displayName } })
 					}
+					if (($MatchedDevice | Measure-Object).Count -gt 0) {
+						$UpdatedMatchedDevices = $true
+					}
 				}
+			}
+
+			if ($UpdatedMatchedDevices -and $MatchedDevicesJsonPath) {
+				# Update the exported MatchedDevices json file
+				$MatchedDevices | ConvertTo-Json | Out-File -FilePath $MatchedDevicesJsonPath
 			}
 		}
 
