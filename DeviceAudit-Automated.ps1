@@ -312,13 +312,786 @@ while ($attempt -ge 0) {
 	}
 }
 
-# Function to convert imported UTC date/times to local time for easier comparisons
-function Convert-UTCtoLocal {
-	param( [parameter(Mandatory=$true)] [String] $UTCTime )
-	$strCurrentTimeZone = (Get-WmiObject win32_timezone).StandardName 
-	$TZ = [System.TimeZoneInfo]::FindSystemTimeZoneById($strCurrentTimeZone) 
-	$LocalTime = [System.TimeZoneInfo]::ConvertTimeFromUtc($UTCTime, $TZ)
-	return $LocalTime
+#################
+# Functions (the 'if' just allows me to collapse them all)
+#################
+if ($true) {
+
+	# Function to convert imported UTC date/times to local time for easier comparisons
+	function Convert-UTCtoLocal {
+		param( [parameter(Mandatory=$true)] [String] $UTCTime )
+		$strCurrentTimeZone = (Get-WmiObject win32_timezone).StandardName 
+		$TZ = [System.TimeZoneInfo]::FindSystemTimeZoneById($strCurrentTimeZone) 
+		$LocalTime = [System.TimeZoneInfo]::ConvertTimeFromUtc($UTCTime, $TZ)
+		return $LocalTime
+	}
+
+	# The id on each Sophos device is not the same ID that is used on the website
+	# To get this ID, we must invert each pair of characters in the ID
+	function convert_sophos_id_to_web($EndpointID) {
+		$WebEndpointID = ""
+		$Length = $EndpointID.length
+		
+		for ($i = 0; $i -lt $Length; $i ++) {
+			if ($EndpointID[$i] -eq "-") {
+				$WebEndpointID += "-"
+				continue
+			}
+			$WebEndpointID += $EndpointID[$i+1]
+			$WebEndpointID += $EndpointID[$i]
+			$i++
+		}
+
+		return $WebEndpointID
+	}
+
+	# This function checks the force match array for any forced matches and returns them
+	# Input the device ID and the $Type of connection (SC, RMM, Sophos, or ITG)
+	# Returns an array containing hashtables for each match with the matching connections type, and device id, and if we want to match with this id or ignore this id
+	# @( @{"type" = "sc, rmm, sophos, or itg", "id" = "device id or $false for no match", "match" = $true if we want to match to this ID, $false if we want to block matches with this id } )
+	function force_match($DeviceID, $Type) {
+		$Types = @("SC", "RMM", "Sophos", "ITG")
+		if (!$Type -or $Type -notin $Types) {
+			return
+		}
+
+		$ForcedMatches = @()
+		foreach ($DefaultType in $Types) {
+			# For each entry in the type we are getting, get all by from id
+			if ($DefaultType -like $Type) {
+				foreach ($Match in $ForceMatch.$Type) {
+					# Check if id matches, if this is a sophos match, see if the inverted id matches as well
+					if ($Match.from -like $DeviceID -or (($Match.tosystem -like "Sophos" -or $DefaultType -like "Sophos") -and (convert_sophos_id_to_web $Match.from) -like $DeviceID)) {
+						$ForcedMatches += @{
+							type = $Match.tosystem
+							id = $Match.to
+							match = [bool]$Match.to
+						}
+					}
+				}
+			# For each entry in other types, get all by to id
+			} else {
+				foreach ($Match in $ForceMatch.$DefaultType) {
+					if ($Match.tosystem -like $Type -and ($Match.to -like $DeviceID -or $Match.to -eq $false -or (($Match.tosystem -like "Sophos" -or $DefaultType -like "Sophos") -and (convert_sophos_id_to_web $Match.to) -like $DeviceID))) {
+						$ForcedMatches += @{
+							type = $DefaultType
+							id = $Match.from
+							match = [bool]$Match.to
+						}
+					}
+				}
+			}
+		}
+
+		# Convert and add a new entry for any sophos ids into their web id equivalent as well (sophos uses inverted ids on their website which is most likely what will be entered in the $ForceMatches section)
+		$ForcedMatchesCopy = $ForcedMatches
+		foreach ($Match in $ForcedMatchesCopy) {
+			if ($Match.type -like "Sophos" -and $Match.id) {
+				$ForcedMatches += @{
+					type = $Match.type
+					id = convert_sophos_id_to_web $Match.id
+					match = $Match.match
+				}
+			}
+		}
+
+		return $ForcedMatches
+	}
+
+	# Function for logging automated changes (installs, deletions, etc.)
+	# $ServiceTarget is 'rmm', 'sc', 'sophos', 'jc', 'itg', or 'autotask'
+	function log_change($Company_Acronym, $ServiceTarget, $RMM_Device_ID, $SC_Device_ID, $Sophos_Device_ID, $JC_Device_ID = $false, $ChangeType, $Hostname = "", $Reason = "") {
+		if (!$LogLocation) {
+			return $false
+		}
+		if (!(Test-Path -Path $LogLocation)) {
+			New-Item -ItemType Directory -Force -Path $LogLocation | Out-Null
+		}
+	
+		$Now = [int](New-TimeSpan -Start (Get-Date "01/01/1970") -End (Get-Date).ToUniversalTime()).TotalSeconds
+		$LogFilePath = "$($LogLocation)\$($Company_Acronym)_log.json"
+		if (Test-Path $LogFilePath) {
+			$LogData = Get-Content -Path $LogFilePath -Raw | ConvertFrom-Json
+			if ($LogData.GetType().BaseType -ne "System.Array") {
+				$LogData = @($LogData)
+			}
+		} else {
+			$LogData = @()
+		}
+	
+		$LogData += [pscustomobject]@{
+			rmm_id = $RMM_Device_ID
+			sc_id = $SC_Device_ID
+			sophos_id = $Sophos_Device_ID
+			jc_id = $JC_Device_ID
+			service_target = $ServiceTarget
+			change = $ChangeType
+			hostname = $Hostname
+			reason = $Reason
+			datetime = $Now
+		}
+	
+		$LogData | ConvertTo-Json -Depth 5 | Out-File -FilePath $LogFilePath
+	}
+
+	# Function for querying a portion of the log history based on the possible filters
+	# $LogHistory is the loaded json from the companies history log
+	# StartTime is the unixtimestamp to start selection from (inclusive)
+	# EndTime is the unixtimestamp to end selection at (exclusive) (if you set it to 'now' it will automatically calculate the current timestamp)
+	# the remainder are optional and can be used as filters, hostname and reason support wildcards
+	function log_query($LogHistory, $StartTime, $EndTime, $ServiceTarget = "", $RMM_Device_ID = "", $SC_Device_ID = "", $Sophos_Device_ID = "", $ChangeType = "", $Hostname = "", $Reason = "") {
+		if ($EndTime -eq 'now') {
+			$EndTime = [int](New-TimeSpan -Start (Get-Date "01/01/1970") -End (Get-Date).ToUniversalTime()).TotalSeconds
+		}
+
+		$History_TimeSubset = $LogHistory | Where-Object { $_.datetime -ge $StartTime -and $_.datetime -lt $EndTime }
+		
+		$History_Filtered = $History_TimeSubset
+		if ($ServiceTarget) {
+			$History_Filtered = $History_Filtered | Where-Object { $_.service_target -eq $ServiceTarget }
+		}
+		if ($RMM_Device_ID) {
+			$History_Filtered = $History_Filtered | Where-Object { $RMM_Device_ID -in $_.rmm_id }
+		}
+		if ($SC_Device_ID) {
+			$History_Filtered = $History_Filtered | Where-Object { $SC_Device_ID -in $_.sc_id }
+		}
+		if ($Sophos_Device_ID) {
+			$History_Filtered = $History_Filtered | Where-Object { $Sophos_Device_ID -in $_.sophos_id }
+		}
+		if ($ChangeType) {
+			$History_Filtered = $History_Filtered | Where-Object { $_.change -eq $ChangeType }
+		}
+		if ($Hostname) {
+			$History_Filtered = $History_Filtered | Where-Object { $_.hostname -like $Hostname }
+		}
+		if ($Reason) {
+			$History_Filtered = $History_Filtered | Where-Object { $_.reason -like $Reason }
+		}
+		
+		return $History_Filtered;
+	}
+
+	# Helper function that queries the log based on the filters and returns the count of entries found
+	function log_attempt_count($LogHistory, $ServiceTarget = "", $RMM_Device_ID = "", $SC_Device_ID = "", $Sophos_Device_ID = "", $ChangeType = "", $Hostname = "", $Reason = "") {
+		$History = log_query -LogHistory $LogHistory -StartTime 0 -EndTime 'now' -ServiceTarget $ServiceTarget -RMM_Device_ID $RMM_Device_ID -SC_Device_ID $SC_Device_ID -Sophos_Device_ID $Sophos_Device_ID -ChangeType $ChangeType -Hostname $Hostname -Reason $Reason
+		return ($History | Measure-Object).Count
+	}
+
+	# This function finds the difference in seconds between the oldest and newest unixtimestamp in a set of log history
+	function log_time_diff($LogHistory) {
+		$Newest = $LogHistory | Sort-Object -Property datetime -Descending | Select-Object -First 1
+		$Oldest = $LogHistory | Sort-Object -Property datetime | Select-Object -First 1
+		return $Newest.datetime - $Oldest.datetime
+	}
+
+	# Function for querying repair tickets based on the possible filters
+	# $ServiceTarget is 'rmm', 'sc', or 'sophos'
+	# $Hostname can be a single hostname or an array of hostnames to check for
+	function repair_tickets($ServiceTarget = "", $Hostname = "") {
+		if ($ServiceTarget -eq 'rmm') {
+			$RepairTickets_ByService = $RepairTickets | Where-Object { $_.title -like "RMM *" -or $_.title -like "* RMM" -or $_.title -like "* RMM *" }
+		} elseif ($ServiceTarget -eq 'sc') {
+			$RepairTickets_ByService = $RepairTickets | Where-Object { $_.title -like "SC *" -or $_.title -like "* SC" -or $_.title -like "* SC *" -or $_.title -like "*ScreenConnect*" }
+		} elseif ($ServiceTarget -eq 'sophos') {
+			$RepairTickets_ByService = $RepairTickets | Where-Object { $_.title -like "Sophos *" -or $_.title -like "* Sophos" -or $_.title -like "* Sophos *" }
+		} else {
+			$RepairTickets_ByService = $RepairTickets
+		}
+
+		if ($Hostname -is [array]) {
+			$RepairTickets_FilteredIDs = @()
+			foreach ($UniqueHostname in $Hostname) {
+				$RepairTickets_FilteredIDs += ($RepairTickets_ByService | Where-Object { $_.title -like "*$($UniqueHostname)*" }).Id
+			}
+			$RepairTickets_FilteredIDs = $RepairTickets_FilteredIDs | Sort-Object -Unique
+			$RepairTickets_Filtered = $RepairTickets_ByService | Where-Object { $_.Id -in $RepairTickets_FilteredIDs }
+		} else {
+			$RepairTickets_Filtered = $RepairTickets_ByService | Where-Object { $_.title -like "*$($Hostname)*" }
+		}
+
+		return $RepairTickets_Filtered;
+	}
+
+	# Checks the log history to see if something has been attempted more than 5 times
+	# and attempts have been made for the past 2 weeks
+	# If so, an email is sent if one hasn't already been sent in the last 2 weeks, and the email is logged
+	# $ErrorMessage can use HTML and it will become the main body of the email sent
+	function check_failed_attempts($LogHistory, $Company_Acronym, $ErrorMessage, $ServiceTarget, $RMM_Device_ID, $SC_Device_ID, $Sophos_Device_ID, $ChangeType, $Hostname = "", $Reason = "") {
+		$TwoWeeksAgo = [int](New-TimeSpan -Start (Get-Date "01/01/1970") -End (Get-Date).AddDays(-14).ToUniversalTime()).TotalSeconds
+		$TenDays = [int](New-TimeSpan -Start (Get-Date).AddDays(-10).ToUniversalTime() -End (Get-Date).ToUniversalTime()).TotalSeconds
+
+		# first check if a repair ticket already exists for this device/service
+		if ($ServiceTarget -in ("rmm", "sc", "sophos")) {
+			$RepairTickets_Filtered = repair_tickets -ServiceTarget $ServiceTarget -Hostname $Hostname
+			if (($RepairTickets_Filtered | Measure-Object).count -gt 0) {
+				break;
+			}
+		}
+
+		# next check if an email was sent about this in the last 2 weeks
+		if ($ChangeType) {
+			$EmailChangeType = $ChangeType + "-email"
+		}
+		if ($Reason) {
+			$EmailReason = "Email sent for " + $Reason
+		} else {
+			$EmailReason = "Email sent for $ChangeType"
+		}
+
+		$ID_Params = @{}
+		$EmailLink = ""
+		if ($ServiceTarget -eq 'rmm') {
+			$ID_Params."RMM_Device_ID" = $RMM_Device_ID
+			$RMMDevice = $RMM_DevicesHash[$RMM_Device_ID]
+			if ($RMMDevice.url) {
+				$EmailLink = $RMMDevice.url
+			} else {
+				$EmailLink = "https://$($DattoAPIKey.Region).centrastage.net/csm/search?qs=uid%3A$($RMM_Device_ID)"
+			}
+		} elseif ($ServiceTarget -eq 'sc') {
+			$ID_Params."SC_Device_ID" = $SC_Device_ID
+			$SCDevice = $SC_DevicesHash[$SC_Device_ID]
+			$EmailLink = "$($SCLogin.URL)/Host#Access/All%20Machines/$($SCDevice.Name)/$SC_Device_ID"
+		} elseif ($ServiceTarget -eq 'sophos') {
+			$ID_Params."Sophos_Device_ID" = $Sophos_Device_ID
+			$EmailLink = "https://cloud.sophos.com/manage/devices/computers/$($Sophos_Device_ID)"
+		}
+
+		$EmailQuery_Params = @{
+			LogHistory = $LogHistory
+			StartTime = $TwoWeeksAgo
+			EndTime = 'now'
+			ServiceTarget = $ServiceTarget
+			ChangeType = $EmailChangeType
+			Hostname = $Hostname
+			Reason = $EmailReason
+		} + $ID_Params
+		$History_Subset_Emails = log_query @EmailQuery_Params
+
+		# no emails were already sent, continue
+		if (($History_Subset_Emails | Measure-Object).count -eq 0) {
+			$FilterQuery_Params = @{
+				LogHistory = $LogHistory
+				StartTime = $TwoWeeksAgo
+				EndTime = 'now'
+				ServiceTarget = $ServiceTarget
+				ChangeType = $ChangeType
+				Hostname = $Hostname
+				Reason = $Reason
+			} + $ID_Params
+			$History_Filtered = log_query @FilterQuery_Params
+
+			# if attempts have been made over at least a 10 day span AND a minimum of 5 attempts have been made
+			if (($History_Filtered | Measure-Object).count -ge 5 -and (log_time_diff($History_Filtered)) -ge $TenDays) {
+				# send an email
+				$EmailSubject = "Device Audit - Auto-Fix Failed: $Hostname ($Company_Acronym)"
+				$EmailIntro = "An auto-fix has been attempted on $Hostname more than 5 times in the past 2 weeks yet the issue is still not resolved. Please resolve this manually."
+
+				$HTMLEmail = $EmailTemplate -f `
+								$EmailIntro, 
+								"Auto-Fix has repeatedly failed", 
+								$ErrorMessage, 
+								"<br />Link: <a href='$EmailLink'>$EmailLink</a> <br /><br />The audit will continue to attempt to automatically fix this issue, but it will likely keep failing. Please resolve this manually."
+
+				$mailbody = @{
+					"From" = $EmailFrom
+					"To" = $EmailTo_FailedFixes
+					"Subject" = $EmailSubject
+					"HTMLContent" = $HTMLEmail
+				} | ConvertTo-Json -Depth 6
+
+				$headers = @{
+					'x-api-key' = $Email_APIKey.Key
+				}
+
+				Invoke-RestMethod -Method Post -Uri $Email_APIKey.Url -Body $mailbody -Headers $headers -ContentType application/json
+				Write-Host "Multiple Failed Auto-Fix Attempts Found. Email Sent." -ForegroundColor Yellow
+
+				# log the sent email
+				log_change -Company_Acronym $Company_Acronym -ServiceTarget $ServiceTarget -RMM_Device_ID $RMM_Device_ID -SC_Device_ID $SC_Device_ID -Sophos_Device_ID $Sophos_Device_ID -ChangeType $EmailChangeType -Hostname $Hostname -Reason $EmailReason
+			}
+		}
+	}
+
+	# Functions for comparing devices by their last active date
+	# Pass the function a list of device ids
+	# Each returns an ordered list with the type (rmm, sc, or sophos), device ID and last active date, ordered with newest first, $null if no date
+	$UnixDateLowLimit = Get-Date -Year 1970 -Month 1 -Day 1 -Hour 0 -Minute 0 -Second 0
+	function compare_activity_sc($DeviceIDs) {
+		$SCDevices = @()
+		foreach ($DeviceID in $DeviceIDs) {
+			$SCDevices += $SC_DevicesHash[$DeviceID]
+		}
+		$DevicesOutput = @()
+
+		foreach ($Device in $SCDevices) {
+			$DeviceOutputObj = [PsCustomObject]@{
+				type = "sc"
+				id = $Device.SessionID
+				last_active = $null
+			}
+
+			if ($Device.GuestLastSeen -and [string]$Device.GuestLastSeen -as [DateTime] -and [DateTime]$Device.GuestLastSeen -gt $UnixDateLowLimit) {
+				$DeviceOutputObj.last_active = [DateTime]$Device.GuestLastSeen
+				$DevicesOutput += $DeviceOutputObj
+			} elseif ($Device.GuestLastActivityTime -and [string]$Device.GuestLastActivityTime -as [DateTime] -and [DateTime]$Device.GuestLastActivityTime -gt $UnixDateLowLimit) {
+				$DeviceOutputObj.last_active = [DateTime]$Device.GuestLastActivityTime
+				$DevicesOutput += $DeviceOutputObj
+			} elseif ($Device.GuestInfoUpdateTime -and [string]$Device.GuestInfoUpdateTime -as [DateTime] -and [DateTime]$Device.GuestInfoUpdateTime -gt $UnixDateLowLimit) {
+				$DeviceOutputObj.last_active = [DateTime]$Device.GuestInfoUpdateTime
+				$DevicesOutput += $DeviceOutputObj
+			} elseif ($Device.GuestLastBootTime -and [string]$Device.GuestLastBootTime -as [DateTime] -and [DateTime]$Device.GuestLastBootTime -gt $UnixDateLowLimit) {
+				$DeviceOutputObj.last_active = [DateTime]$Device.GuestLastBootTime
+				$DevicesOutput += $DeviceOutputObj
+			}
+		}
+		
+		$DevicesOutput = $DevicesOutput | Sort-Object last_active -Desc
+
+		$DevicesOutput
+		return
+	}
+
+	function compare_activity_rmm($DeviceIDs) {
+		$Now = Get-Date
+		$RMMDevices = @()
+		foreach ($DeviceID in $DeviceIDs) {
+			$RMMDevices += $RMM_DevicesHash[$DeviceID]
+		}
+
+		$DevicesOutput = @()
+
+		foreach ($Device in $RMMDevices) {
+			$DeviceOutputObj = [PsCustomObject]@{
+				type = "rmm"
+				id = $Device."Device UID"
+				last_active = $null
+			}
+
+			if ($Device.Status -eq "Online" -or $Device."Last Seen" -eq "Currently Online") {
+				$DeviceOutputObj.last_active = $Now
+				$DevicesOutput += $DeviceOutputObj
+			} elseif ($Device."Last Seen" -and [string]$Device."Last Seen" -as [DateTime]) {
+				$DeviceOutputObj.last_active = [DateTime]$Device."Last Seen"
+				$DevicesOutput += $DeviceOutputObj
+			}
+		}
+
+		$DevicesOutput = $DevicesOutput | Sort-Object last_active -Desc
+
+		$DevicesOutput
+		return
+	}
+
+	function compare_activity_sophos($DeviceIDs) {
+		$SophosDevices = @()
+		foreach ($DeviceID in $DeviceIDs) {
+			$SophosDevices += $Sophos_DevicesHash[$DeviceID]
+		}
+		$DevicesOutput = @()
+
+		foreach ($Device in $SophosDevices) {
+			$DeviceOutputObj = [PsCustomObject]@{
+				type = "sophos"
+				id = $Device.id
+				last_active = $null
+			}
+
+			if ($Device.lastSeenAt -and [string]$Device.lastSeenAt -as [DateTime]) {
+				$DeviceOutputObj.last_active = [DateTime]$Device.lastSeenAt
+				$DevicesOutput += $DeviceOutputObj
+			}
+		}
+
+		$DevicesOutput = $DevicesOutput | Sort-Object last_active -Desc
+
+		$DevicesOutput
+		return
+	}
+
+	function compare_activity_jc($DeviceIDs) {
+		$JCDevices = @()
+		foreach ($DeviceID in $DeviceIDs) {
+			$JCDevices += $JC_DevicesHash[$DeviceID]
+		}
+		$DevicesOutput = @()
+
+		foreach ($Device in $JCDevices) {
+			$DeviceOutputObj = [PsCustomObject]@{
+				type = "jc"
+				id = $Device.id
+				last_active = $null
+			}
+
+			if ($Device.lastContact -and [string]$Device.lastContact -as [DateTime]) {
+				$DeviceOutputObj.last_active = [DateTime]$Device.lastContact
+				$DevicesOutput += $DeviceOutputObj
+			}
+		}
+
+		$DevicesOutput = $DevicesOutput | Sort-Object last_active -Desc
+
+		$DevicesOutput
+		return
+	}
+
+	function compare_activity_azure($DeviceIDs) {
+		$AzureDevices = @()
+		foreach ($DeviceID in $DeviceIDs) {
+			$AzureDevices += $Azure_DevicesHash[$DeviceID]
+		}
+		$DevicesOutput = @()
+
+		foreach ($Device in $AzureDevices) {
+			$DeviceOutputObj = [PsCustomObject]@{
+				type = "azure"
+				id = $Device.id
+				last_active = $null
+			}
+
+			if ($Device.ApproximateLastSignInDateTime -and [string]$Device.ApproximateLastSignInDateTime -as [DateTime]) {
+				$DeviceOutputObj.last_active = [DateTime]$Device.ApproximateLastSignInDateTime
+				$DevicesOutput += $DeviceOutputObj
+			}
+		}
+
+		$DevicesOutput = $DevicesOutput | Sort-Object last_active -Desc
+
+		$DevicesOutput
+		return
+	}
+
+	function compare_activity_intune($DeviceIDs) {
+		$IntuneDevices = @()
+		foreach ($DeviceID in $DeviceIDs) {
+			$IntuneDevices += $Intune_DevicesHash[$DeviceID]
+		}
+		$DevicesOutput = @()
+
+		foreach ($Device in $IntuneDevices) {
+			$DeviceOutputObj = [PsCustomObject]@{
+				type = "intune"
+				id = $Device.id
+				last_active = $null
+			}
+
+			if ($Device.LastSyncDateTime -and [string]$Device.LastSyncDateTime -as [DateTime]) {
+				$DeviceOutputObj.last_active = [DateTime]$Device.LastSyncDateTime
+				$DevicesOutput += $DeviceOutputObj
+			}
+		}
+
+		$DevicesOutput = $DevicesOutput | Sort-Object last_active -Desc
+
+		$DevicesOutput
+		return
+	}
+
+	# Helper function that takes a $MatchedDevices object and returns the activity comparison for SC, RMM, Sophos, and (if applicable) Azure & Intune
+	function compare_activity($MatchedDevice) {
+		$Activity = @{}
+
+		if ($MatchedDevice.sc_matches -and $MatchedDevice.sc_matches.count -gt 0) {
+			$SCActivity = compare_activity_sc $MatchedDevice.sc_matches
+			$Activity.sc = $SCActivity | Sort-Object last_active -Descending | Select-Object -First 1
+		}
+
+		if ($MatchedDevice.rmm_matches -and $MatchedDevice.rmm_matches.count -gt 0) {
+			$RMMActivity = compare_activity_rmm $MatchedDevice.rmm_matches
+			$Activity.rmm = $RMMActivity | Sort-Object last_active -Descending | Select-Object -First 1
+		}
+
+		if ($MatchedDevice.sophos_matches -and $MatchedDevice.sophos_matches.count -gt 0) {
+			$SophosActivity = compare_activity_sophos $MatchedDevice.sophos_matches
+			$Activity.sophos = $SophosActivity | Sort-Object last_active -Descending | Select-Object -First 1
+		}
+
+		if ($JCConnected -and $MatchedDevice.jc_matches -and $MatchedDevice.jc_matches.count -gt 0) {
+			$JCActivity = compare_activity_jc $MatchedDevice.jc_matches
+			$Activity.jc = $JCActivity | Sort-Object last_active -Descending | Select-Object -First 1
+		}
+
+		if ($MatchedDevice.azure_matches -and $MatchedDevice.azure_matches.count -gt 0) {
+			$AzureActivity = compare_activity_azure $MatchedDevice.azure_matches
+			$Activity.azure = $AzureActivity | Sort-Object last_active -Descending | Select-Object -First 1
+		}
+
+		if ($MatchedDevice.intune_matches -and $MatchedDevice.intune_matches.count -gt 0) {
+			$IntuneActivity = compare_activity_intune $MatchedDevice.intune_matches
+			$Activity.intune = $IntuneActivity | Sort-Object last_active -Descending | Select-Object -First 1
+		}
+
+		$Activity
+		return
+	}
+
+	# Helper function that checks a device from the $MatchedDevices array against the $Ignore_Installs config value and returns true if it should be ignored
+	# Also ignores Sophos on Hyper-V hosts via a regex check
+	# $System should be 'sc', 'rmm', or 'sophos'
+	function ignore_install($Device, $System) {
+		if ($System -eq 'sc' -and $Ignore_Installs.SC -eq $true) {
+			return $true
+		} elseif ($System -eq 'rmm' -and $Ignore_Installs.RMM -eq $true) {
+			return $true
+		} elseif ($System -eq 'sophos' -and $Ignore_Installs.Sophos -eq $true) {
+			return $true
+		}
+
+		if ($System -eq 'sophos' -and ($Device.rmm_hostname -match $HyperVRegex -or $Device.sc_hostname -match $HyperVRegex)) {
+			return $true;
+		}
+
+		$IgnoredDevices = @()
+		if ($System -eq 'sc') {
+			$IgnoredDevices = $Ignore_Installs.SC
+		} elseif ($System -eq 'rmm') {
+			$IgnoredDevices = $Ignore_Installs.RMM
+		} elseif ($System -eq 'sophos') {
+			$IgnoredDevices = $Ignore_Installs.Sophos
+		}
+
+		if ($IgnoredDevices) {
+			if ($System -eq 'sc' -and ($IgnoredDevices | Where-Object { $_ -in $Device.rmm_hostname -or $_ -in $Device.rmm_matches -or $_ -in $Device.sophos_hostname -or $_ -in $Device.sophos_matches } | Measure-Object).Count -gt 0) {
+				return $true
+			} elseif ($System -eq 'rmm' -and ($IgnoredDevices | Where-Object { $_ -in $Device.sc_hostname -or $_ -in $Device.sc_matches -or $_ -in $Device.sophos_hostname -or $_ -in $Device.sophos_matches } | Measure-Object).Count -gt 0) {
+				return $true
+			} elseif ($System -eq 'sophos' -and ($IgnoredDevices | Where-Object { $_ -in $Device.sc_hostname -or $_ -in $Device.sc_matches -or $_ -in $Device.rmm_hostname -or $_ -in $Device.rmm_matches  } | Measure-Object).Count -gt 0) {
+				return $true
+			}
+		} else {
+			return $false
+		}
+	}
+
+	# Deletes a device from ScreenConnect
+	function delete_from_sc($SC_ID, $SCWebSession) {
+		# Get an anti-forgery token from the website
+		$Response = Invoke-WebRequest "$($SCLogin.URL)/Host#Access/All%20Machines//$SC_ID" -WebSession $SCWebSession -Method 'POST' -ContentType 'application/json'
+		$Response.RawContent -match '"antiForgeryToken":"(.+?)"' | Out-Null
+		$AntiForgeryToken = $matches[1]
+
+		if ($AntiForgeryToken) {
+			$FormBody = '[["All Machines"],[{"SessionID": "' + $SC_ID + '","EventType":21,"Data":null}]]'
+			$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/PageService.ashx/AddSessionEvents" -WebSession $SCWebSession -Headers @{"X-Anti-Forgery-Token" = $AntiForgeryToken} -Body $FormBody -Method 'POST' -ContentType 'application/json'
+			return $true
+		} else {
+			Write-Warning "Could not get an anti-forgery token from Screenconnect. Failed to delete device from SC: $SC_ID"
+			return $false
+		}
+	}
+
+	# This doesn't truly delete a device from RMM (we can't using the API), instead it sets the Delete Me UDF which adds the device into the device filter of devices we should delete
+	function delete_from_rmm($RMM_Device_ID) {
+		Set-DrmmDeviceUdf -deviceUid $RMM_Device_ID -udf30 "True"
+	}
+
+	# Deletes a device from Sophos (be careful with this, make sure it no longer is installed on the device!)
+	# Only works if using the sophos API. Pass in the same headers used for getting the endpoints.
+	function delete_from_sophos($Sophos_Device_ID, $TenantApiHost, $SophosHeader) {
+		if ($Sophos_Device_ID -and $TenantApiHost -and $SophosHeader) {
+			try {
+				$Response = Invoke-RestMethod -Method DELETE -Headers $SophosHeader -uri ($TenantApiHost + "/endpoint/v1/endpoints/$Sophos_Device_ID")
+				if ($Response.deleted -eq "True") {
+					return $true
+				}
+			} catch {
+				Write-Error "Could not auto-delete Sophos device '$Sophos_Device_ID' for the reason: " + $_.Exception.Message
+			}
+		}
+		return $false
+	}
+
+	# Deletes a device from JumpCloud
+	function delete_from_jc($JC_ID) {
+		$Deleted = $false
+		if ($JC_ID) {
+			$Deleted = Remove-JCSystem -SystemID $JC_ID -Force
+		}
+
+		if ($Deleted -and $Deleted.Results -like "Deleted") {
+			return $true
+		} else {
+			Write-Warning "Could not delete device '$($JC_ID)' from JumpCloud."
+			return $false
+		}
+	}
+
+	# Archives a configuration in ITG
+	function archive_itg($ITG_Device_ID) {
+		$UpdatedConfig = @{
+			'type' = 'configurations'
+			'attributes' = @{
+				'archived' = 'true'
+			}
+		}
+
+		try {
+			Set-ITGlueConfigurations -id $ITG_Device_ID -data $UpdatedConfig
+			return $true
+		} catch {
+			Write-Error "Could not archive ITG configuration '$ITG_Device_ID' for the reason: " + $_.Exception.Message
+			return $false
+		}
+	}
+
+	# Cleans up the name of a Manufacturer
+	function manufacturer_cleanup($Manufacturer) {
+		if ($Manufacturer) {
+			$CleanedManufacturer = $Manufacturer
+			if ($CleanedManufacturer -like "*/*") {
+				$CleanedManufacturer = ($CleanedManufacturer -split '/')[0]
+			}
+			$CleanedManufacturer = $CleanedManufacturer.Trim()
+			$CleanedManufacturer = $CleanedManufacturer -replace ",? ?(Inc\.?$|Corporation$|Corp\.?$|Co\.$|Ltd\.?$)", ""
+			$CleanedManufacturer = $CleanedManufacturer.Trim()
+			$CleanedManufacturer = $CleanedManufacturer -replace ",? ?(Inc\.?$|Corporation$|Corp\.?$|Co\.$|Ltd\.?$)", ""
+			$CleanedManufacturer = $CleanedManufacturer.Trim()
+
+			return $CleanedManufacturer
+		} else {
+			return $null
+		}
+	}
+
+	# Converts a subnet mask into a Cidr range
+	function Convert-SubnetMaskToCidr($Subnet) {
+		# From: https://codeandkeep.com/PowerShell-Get-Subnet-NetworkID/
+		$NetMaskIP = [IPAddress]$Subnet
+		$BinaryString = [String]::Empty
+		$NetMaskIP.GetAddressBytes() | ForEach-Object {
+			$BinaryString += [Convert]::ToString($_, 2)
+		}
+		return $binaryString.TrimEnd('0').Length
+	}
+
+	# Levenshtein distance function for comparing similarity between two strings
+	function Measure-StringDistance {
+		<#
+			.SYNOPSIS
+				Compute the distance between two strings using the Levenshtein distance formula.
+			
+			.DESCRIPTION
+				Compute the distance between two strings using the Levenshtein distance formula.
+
+			.PARAMETER Source
+				The source string.
+
+			.PARAMETER Compare
+				The comparison string.
+
+			.EXAMPLE
+				PS C:\> Measure-StringDistance -Source "Michael" -Compare "Micheal"
+
+				2
+
+				There are two characters that are different, "a" and "e".
+
+			.EXAMPLE
+				PS C:\> Measure-StringDistance -Source "Michael" -Compare "Michal"
+
+				1
+
+				There is one character that is different, "e".
+
+			.NOTES
+				Author:
+				Michael West
+		#>
+
+		[CmdletBinding(SupportsShouldProcess=$true)]
+		[OutputType([int])]
+		param (
+			[Parameter(ValueFromPipelineByPropertyName=$true)]
+			[string]$Source = "",
+			[string]$Compare = ""
+		)
+		$n = $Source.Length;
+		$m = $Compare.Length;
+		$d = New-Object 'int[,]' $($n+1),$($m+1)
+			
+		if ($n -eq 0){
+		return $m
+		}
+		if ($m -eq 0){
+			return $n
+		}
+
+		for ([int]$i = 0; $i -le $n; $i++){
+			$d[$i, 0] = $i
+		}
+		for ([int]$j = 0; $j -le $m; $j++){
+			$d[0, $j] = $j
+		}
+
+		for ([int]$i = 1; $i -le $n; $i++){
+			for ([int]$j = 1; $j -le $m; $j++){
+				if ($Compare[$($j - 1)] -eq $Source[$($i - 1)]){
+					$cost = 0
+				}
+				else{
+					$cost = 1
+				}
+				$d[$i, $j] = [Math]::Min([Math]::Min($($d[$($i-1), $j] + 1), $($d[$i, $($j-1)] + 1)),$($d[$($i-1), $($j-1)]+$cost))
+			}
+		}
+			
+		return $d[$n, $m]
+	}
+
+	# Functions for installing/reinstalling SC/RMM/Sophos
+
+	# Installs RMM on a device using ScreenConnect
+	# $SC_ID the GUID of the device in screenconnect
+	# $RMM_ORG_ID the GUID of the organization in RMM (found in the organization under Settings > General > ID)
+	# $SCWebSession the web session used to authenticate with Screenconnect previously
+	function install_rmm_using_sc($SC_ID, $RMM_ORG_ID, $SCWebSession) {
+		# Get an anti-forgery token from the website
+		$Response = Invoke-WebRequest "$($SCLogin.URL)/Host#Access/All%20Machines//$SC_ID" -WebSession $SCWebSession -Method 'POST' -ContentType 'application/json'
+		$Response.RawContent -match '"antiForgeryToken":"(.+?)"' | Out-Null
+		$AntiForgeryToken = $matches[1]
+
+		if ($AntiForgeryToken) {
+			$RMMInstallCmd = "#timeout=100000\npowershell -command \`"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://$($DattoAPIKey.Region).centrastage.net/csm/profile/downloadAgent/$RMM_ORG_ID' -OutFile c:\\windows\\temp\\AEM-Installer.exe; c:\\windows\\temp\\AEM-Installer.exe /s; Write-Host 'RMM Install Complete';\`""
+
+			$FormBody = '[["All Machines"],[{"SessionID": "' + $SC_ID + '","EventType":44,"Data":"' + $RMMInstallCmd + '"}]]'
+			$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/PageService.ashx/AddSessionEvents" -WebSession $SCWebSession -Headers @{"X-Anti-Forgery-Token" = $AntiForgeryToken} -Body $FormBody -Method 'POST' -ContentType 'application/json'
+			return $true
+		} else {
+			Write-Warning "Could not get an anti-forgery token from Screenconnect. Failed to install RMM for SC device ID: $SC_ID"
+			return $false
+		}
+	}
+
+	function install_rmm_using_sc_mac($SC_ID, $RMM_ORG_ID, $SCWebSession) {
+		# Get an anti-forgery token from the website
+		$Response = Invoke-WebRequest "$($SCLogin.URL)/Host#Access/All%20Machines//$SC_ID" -WebSession $SCWebSession -Method 'POST' -ContentType 'application/json'
+		$Response.RawContent -match '"antiForgeryToken":"(.+?)"' | Out-Null
+		$AntiForgeryToken = $matches[1]
+	
+		if ($AntiForgeryToken) {
+			$RMMInstallCmd = "#timeout=100000\n#!bash\ncd /tmp\ncurl -o aem-installer.zip 'https://$($DattoAPIKey.Region).centrastage.net/csm/profile/downloadMacAgent/$RMM_ORG_ID'\nunzip -a aem-installer.zip\ncd AgentSetup\nsudo installer -pkg CAG.pkg -target /"
+	
+			$FormBody = '[["All Machines"],[{"SessionID": "' + $SC_ID + '","EventType":44,"Data":"' + $RMMInstallCmd + '"}]]'
+			$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/PageService.ashx/AddSessionEvents" -WebSession $SCWebSession -Headers @{"X-Anti-Forgery-Token" = $AntiForgeryToken} -Body $FormBody -Method 'POST' -ContentType 'application/json'
+	
+			return $true
+		} else {
+			Write-Warning "Could not get an anti-forgery token from Screenconnect. Failed to install RMM for SC device ID: $SC_ID"
+			return $false
+		}
+	}
+
+	function install_sc_using_rmm($RMM_Device) {
+		if ($RMM_Device."Operating System" -like "*Windows*") {
+			Set-DrmmDeviceQuickJob -DeviceUid $RMM_Device."Device UID" -jobName "Install ScreenConnect on $($RMM_Device."Device Hostname")" -ComponentName "ScreenConnect Install - WIN"
+			return $true
+		} elseif ($RMM_Device."Operating System" -like "*Mac OS*") {
+			Set-DrmmDeviceQuickJob -DeviceUid $RMM_Device."Device UID" -jobName "Install ScreenConnect on $($RMM_Device."Device Hostname")" -ComponentName "ScreenConnect Install - MAC"
+			return $true
+		}
+		return $false
+	}
 }
 
 $DeviceCount_Overview = @()
@@ -663,25 +1436,6 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		$Sophos_DevicesHash[$Device.id] = $Device
 	}
 
-	# The id on each Sophos device is not the same ID that is used on the website
-	# To get this ID, we must invert each pair of characters in the ID
-	function convert_sophos_id_to_web($EndpointID) {
-		$WebEndpointID = ""
-		$Length = $EndpointID.length
-		
-		for ($i = 0; $i -lt $Length; $i ++) {
-			if ($EndpointID[$i] -eq "-") {
-				$WebEndpointID += "-"
-				continue
-			}
-			$WebEndpointID += $EndpointID[$i+1]
-			$WebEndpointID += $EndpointID[$i]
-			$i++
-		}
-
-		return $WebEndpointID
-	}
-
 	foreach ($Device in $Sophos_Devices) {
 		$Device | Add-Member -NotePropertyName webID -NotePropertyValue $false
 		$EndpointID = $Device.id
@@ -692,59 +1446,6 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	##############
 	# Matching Section
 	##############
-
-	# This function checks the force match array for any forced matches and returns them
-	# Input the device ID and the $Type of connection (SC, RMM, Sophos, or ITG)
-	# Returns an array containing hashtables for each match with the matching connections type, and device id, and if we want to match with this id or ignore this id
-	# @( @{"type" = "sc, rmm, sophos, or itg", "id" = "device id or $false for no match", "match" = $true if we want to match to this ID, $false if we want to block matches with this id } )
-	function force_match($DeviceID, $Type) {
-		$Types = @("SC", "RMM", "Sophos", "ITG")
-		if (!$Type -or $Type -notin $Types) {
-			return
-		}
-
-		$ForcedMatches = @()
-		foreach ($DefaultType in $Types) {
-			# For each entry in the type we are getting, get all by from id
-			if ($DefaultType -like $Type) {
-				foreach ($Match in $ForceMatch.$Type) {
-					# Check if id matches, if this is a sophos match, see if the inverted id matches as well
-					if ($Match.from -like $DeviceID -or (($Match.tosystem -like "Sophos" -or $DefaultType -like "Sophos") -and (convert_sophos_id_to_web $Match.from) -like $DeviceID)) {
-						$ForcedMatches += @{
-							type = $Match.tosystem
-							id = $Match.to
-							match = [bool]$Match.to
-						}
-					}
-				}
-			# For each entry in other types, get all by to id
-			} else {
-				foreach ($Match in $ForceMatch.$DefaultType) {
-					if ($Match.tosystem -like $Type -and ($Match.to -like $DeviceID -or $Match.to -eq $false -or (($Match.tosystem -like "Sophos" -or $DefaultType -like "Sophos") -and (convert_sophos_id_to_web $Match.to) -like $DeviceID))) {
-						$ForcedMatches += @{
-							type = $DefaultType
-							id = $Match.from
-							match = [bool]$Match.to
-						}
-					}
-				}
-			}
-		}
-
-		# Convert and add a new entry for any sophos ids into their web id equivalent as well (sophos uses inverted ids on their website which is most likely what will be entered in the $ForceMatches section)
-		$ForcedMatchesCopy = $ForcedMatches
-		foreach ($Match in $ForcedMatchesCopy) {
-			if ($Match.type -like "Sophos" -and $Match.id) {
-				$ForcedMatches += @{
-					type = $Match.type
-					id = convert_sophos_id_to_web $Match.id
-					match = $Match.match
-				}
-			}
-		}
-
-		return $ForcedMatches
-	}
 
 	# Match devices between the device lists
 	Write-Host "Matching devices..."
@@ -1828,647 +2529,6 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		$LogHistory = @{}
 	}
 
-	# Function for logging automated changes (installs, deletions, etc.)
-	# $ServiceTarget is 'rmm', 'sc', 'sophos', 'jc', 'itg', or 'autotask'
-	function log_change($Company_Acronym, $ServiceTarget, $RMM_Device_ID, $SC_Device_ID, $Sophos_Device_ID, $JC_Device_ID = $false, $ChangeType, $Hostname = "", $Reason = "") {
-		if (!$LogLocation) {
-			return $false
-		}
-		if (!(Test-Path -Path $LogLocation)) {
-			New-Item -ItemType Directory -Force -Path $LogLocation | Out-Null
-		}
-	
-		$Now = [int](New-TimeSpan -Start (Get-Date "01/01/1970") -End (Get-Date).ToUniversalTime()).TotalSeconds
-		$LogFilePath = "$($LogLocation)\$($Company_Acronym)_log.json"
-		if (Test-Path $LogFilePath) {
-			$LogData = Get-Content -Path $LogFilePath -Raw | ConvertFrom-Json
-			if ($LogData.GetType().BaseType -ne "System.Array") {
-				$LogData = @($LogData)
-			}
-		} else {
-			$LogData = @()
-		}
-	
-		$LogData += [pscustomobject]@{
-			rmm_id = $RMM_Device_ID
-			sc_id = $SC_Device_ID
-			sophos_id = $Sophos_Device_ID
-			jc_id = $JC_Device_ID
-			service_target = $ServiceTarget
-			change = $ChangeType
-			hostname = $Hostname
-			reason = $Reason
-			datetime = $Now
-		}
-	
-		$LogData | ConvertTo-Json -Depth 5 | Out-File -FilePath $LogFilePath
-	}
-
-	# Function for querying a portion of the log history based on the possible filters
-	# $LogHistory is the loaded json from the companies history log
-	# StartTime is the unixtimestamp to start selection from (inclusive)
-	# EndTime is the unixtimestamp to end selection at (exclusive) (if you set it to 'now' it will automatically calculate the current timestamp)
-	# the remainder are optional and can be used as filters, hostname and reason support wildcards
-	function log_query($LogHistory, $StartTime, $EndTime, $ServiceTarget = "", $RMM_Device_ID = "", $SC_Device_ID = "", $Sophos_Device_ID = "", $ChangeType = "", $Hostname = "", $Reason = "") {
-		if ($EndTime -eq 'now') {
-			$EndTime = [int](New-TimeSpan -Start (Get-Date "01/01/1970") -End (Get-Date).ToUniversalTime()).TotalSeconds
-		}
-
-		$History_TimeSubset = $LogHistory | Where-Object { $_.datetime -ge $StartTime -and $_.datetime -lt $EndTime }
-		
-		$History_Filtered = $History_TimeSubset
-		if ($ServiceTarget) {
-			$History_Filtered = $History_Filtered | Where-Object { $_.service_target -eq $ServiceTarget }
-		}
-		if ($RMM_Device_ID) {
-			$History_Filtered = $History_Filtered | Where-Object { $RMM_Device_ID -in $_.rmm_id }
-		}
-		if ($SC_Device_ID) {
-			$History_Filtered = $History_Filtered | Where-Object { $SC_Device_ID -in $_.sc_id }
-		}
-		if ($Sophos_Device_ID) {
-			$History_Filtered = $History_Filtered | Where-Object { $Sophos_Device_ID -in $_.sophos_id }
-		}
-		if ($ChangeType) {
-			$History_Filtered = $History_Filtered | Where-Object { $_.change -eq $ChangeType }
-		}
-		if ($Hostname) {
-			$History_Filtered = $History_Filtered | Where-Object { $_.hostname -like $Hostname }
-		}
-		if ($Reason) {
-			$History_Filtered = $History_Filtered | Where-Object { $_.reason -like $Reason }
-		}
-		
-		return $History_Filtered;
-	}
-
-	# Helper function that queries the log based on the filters and returns the count of entries found
-	function log_attempt_count($LogHistory, $ServiceTarget = "", $RMM_Device_ID = "", $SC_Device_ID = "", $Sophos_Device_ID = "", $ChangeType = "", $Hostname = "", $Reason = "") {
-		$History = log_query -LogHistory $LogHistory -StartTime 0 -EndTime 'now' -ServiceTarget $ServiceTarget -RMM_Device_ID $RMM_Device_ID -SC_Device_ID $SC_Device_ID -Sophos_Device_ID $Sophos_Device_ID -ChangeType $ChangeType -Hostname $Hostname -Reason $Reason
-		return ($History | Measure-Object).Count
-	}
-
-	# This function finds the difference in seconds between the oldest and newest unixtimestamp in a set of log history
-	function log_time_diff($LogHistory) {
-		$Newest = $LogHistory | Sort-Object -Property datetime -Descending | Select-Object -First 1
-		$Oldest = $LogHistory | Sort-Object -Property datetime | Select-Object -First 1
-		return $Newest.datetime - $Oldest.datetime
-	}
-
-	# Function for querying repair tickets based on the possible filters
-	# $ServiceTarget is 'rmm', 'sc', or 'sophos'
-	# $Hostname can be a single hostname or an array of hostnames to check for
-	function repair_tickets($ServiceTarget = "", $Hostname = "") {
-		if ($ServiceTarget -eq 'rmm') {
-			$RepairTickets_ByService = $RepairTickets | Where-Object { $_.title -like "RMM *" -or $_.title -like "* RMM" -or $_.title -like "* RMM *" }
-		} elseif ($ServiceTarget -eq 'sc') {
-			$RepairTickets_ByService = $RepairTickets | Where-Object { $_.title -like "SC *" -or $_.title -like "* SC" -or $_.title -like "* SC *" -or $_.title -like "*ScreenConnect*" }
-		} elseif ($ServiceTarget -eq 'sophos') {
-			$RepairTickets_ByService = $RepairTickets | Where-Object { $_.title -like "Sophos *" -or $_.title -like "* Sophos" -or $_.title -like "* Sophos *" }
-		} else {
-			$RepairTickets_ByService = $RepairTickets
-		}
-
-		if ($Hostname -is [array]) {
-			$RepairTickets_FilteredIDs = @()
-			foreach ($UniqueHostname in $Hostname) {
-				$RepairTickets_FilteredIDs += ($RepairTickets_ByService | Where-Object { $_.title -like "*$($UniqueHostname)*" }).Id
-			}
-			$RepairTickets_FilteredIDs = $RepairTickets_FilteredIDs | Sort-Object -Unique
-			$RepairTickets_Filtered = $RepairTickets_ByService | Where-Object { $_.Id -in $RepairTickets_FilteredIDs }
-		} else {
-			$RepairTickets_Filtered = $RepairTickets_ByService | Where-Object { $_.title -like "*$($Hostname)*" }
-		}
-
-		return $RepairTickets_Filtered;
-	}
-
-	# Checks the log history to see if something has been attempted more than 5 times
-	# and attempts have been made for the past 2 weeks
-	# If so, an email is sent if one hasn't already been sent in the last 2 weeks, and the email is logged
-	# $ErrorMessage can use HTML and it will become the main body of the email sent
-	function check_failed_attempts($LogHistory, $Company_Acronym, $ErrorMessage, $ServiceTarget, $RMM_Device_ID, $SC_Device_ID, $Sophos_Device_ID, $ChangeType, $Hostname = "", $Reason = "") {
-		$TwoWeeksAgo = [int](New-TimeSpan -Start (Get-Date "01/01/1970") -End (Get-Date).AddDays(-14).ToUniversalTime()).TotalSeconds
-		$TenDays = [int](New-TimeSpan -Start (Get-Date).AddDays(-10).ToUniversalTime() -End (Get-Date).ToUniversalTime()).TotalSeconds
-
-		# first check if a repair ticket already exists for this device/service
-		if ($ServiceTarget -in ("rmm", "sc", "sophos")) {
-			$RepairTickets_Filtered = repair_tickets -ServiceTarget $ServiceTarget -Hostname $Hostname
-			if (($RepairTickets_Filtered | Measure-Object).count -gt 0) {
-				break;
-			}
-		}
-
-		# next check if an email was sent about this in the last 2 weeks
-		if ($ChangeType) {
-			$EmailChangeType = $ChangeType + "-email"
-		}
-		if ($Reason) {
-			$EmailReason = "Email sent for " + $Reason
-		} else {
-			$EmailReason = "Email sent for $ChangeType"
-		}
-
-		$ID_Params = @{}
-		$EmailLink = ""
-		if ($ServiceTarget -eq 'rmm') {
-			$ID_Params."RMM_Device_ID" = $RMM_Device_ID
-			$RMMDevice = $RMM_DevicesHash[$RMM_Device_ID]
-			if ($RMMDevice.url) {
-				$EmailLink = $RMMDevice.url
-			} else {
-				$EmailLink = "https://$($DattoAPIKey.Region).centrastage.net/csm/search?qs=uid%3A$($RMM_Device_ID)"
-			}
-		} elseif ($ServiceTarget -eq 'sc') {
-			$ID_Params."SC_Device_ID" = $SC_Device_ID
-			$SCDevice = $SC_DevicesHash[$SC_Device_ID]
-			$EmailLink = "$($SCLogin.URL)/Host#Access/All%20Machines/$($SCDevice.Name)/$SC_Device_ID"
-		} elseif ($ServiceTarget -eq 'sophos') {
-			$ID_Params."Sophos_Device_ID" = $Sophos_Device_ID
-			$EmailLink = "https://cloud.sophos.com/manage/devices/computers/$($Sophos_Device_ID)"
-		}
-
-		$EmailQuery_Params = @{
-			LogHistory = $LogHistory
-			StartTime = $TwoWeeksAgo
-			EndTime = 'now'
-			ServiceTarget = $ServiceTarget
-			ChangeType = $EmailChangeType
-			Hostname = $Hostname
-			Reason = $EmailReason
-		} + $ID_Params
-		$History_Subset_Emails = log_query @EmailQuery_Params
-
-		# no emails were already sent, continue
-		if (($History_Subset_Emails | Measure-Object).count -eq 0) {
-			$FilterQuery_Params = @{
-				LogHistory = $LogHistory
-				StartTime = $TwoWeeksAgo
-				EndTime = 'now'
-				ServiceTarget = $ServiceTarget
-				ChangeType = $ChangeType
-				Hostname = $Hostname
-				Reason = $Reason
-			} + $ID_Params
-			$History_Filtered = log_query @FilterQuery_Params
-
-			# if attempts have been made over at least a 10 day span AND a minimum of 5 attempts have been made
-			if (($History_Filtered | Measure-Object).count -ge 5 -and (log_time_diff($History_Filtered)) -ge $TenDays) {
-				# send an email
-				$EmailSubject = "Device Audit - Auto-Fix Failed: $Hostname ($Company_Acronym)"
-				$EmailIntro = "An auto-fix has been attempted on $Hostname more than 5 times in the past 2 weeks yet the issue is still not resolved. Please resolve this manually."
-
-				$HTMLEmail = $EmailTemplate -f `
-								$EmailIntro, 
-								"Auto-Fix has repeatedly failed", 
-								$ErrorMessage, 
-								"<br />Link: <a href='$EmailLink'>$EmailLink</a> <br /><br />The audit will continue to attempt to automatically fix this issue, but it will likely keep failing. Please resolve this manually."
-
-				$mailbody = @{
-					"From" = $EmailFrom
-					"To" = $EmailTo_FailedFixes
-					"Subject" = $EmailSubject
-					"HTMLContent" = $HTMLEmail
-				} | ConvertTo-Json -Depth 6
-
-				$headers = @{
-					'x-api-key' = $Email_APIKey.Key
-				}
-
-				Invoke-RestMethod -Method Post -Uri $Email_APIKey.Url -Body $mailbody -Headers $headers -ContentType application/json
-				Write-Host "Multiple Failed Auto-Fix Attempts Found. Email Sent." -ForegroundColor Yellow
-
-				# log the sent email
-				log_change -Company_Acronym $Company_Acronym -ServiceTarget $ServiceTarget -RMM_Device_ID $RMM_Device_ID -SC_Device_ID $SC_Device_ID -Sophos_Device_ID $Sophos_Device_ID -ChangeType $EmailChangeType -Hostname $Hostname -Reason $EmailReason
-			}
-		}
-	}
-
-	# Functions for comparing devices by their last active date
-	# Pass the function a list of device ids
-	# Each returns an ordered list with the type (rmm, sc, or sophos), device ID and last active date, ordered with newest first, $null if no date
-	$UnixDateLowLimit = Get-Date -Year 1970 -Month 1 -Day 1 -Hour 0 -Minute 0 -Second 0
-	function compare_activity_sc($DeviceIDs) {
-		$SCDevices = @()
-		foreach ($DeviceID in $DeviceIDs) {
-			$SCDevices += $SC_DevicesHash[$DeviceID]
-		}
-		$DevicesOutput = @()
-
-		foreach ($Device in $SCDevices) {
-			$DeviceOutputObj = [PsCustomObject]@{
-				type = "sc"
-				id = $Device.SessionID
-				last_active = $null
-			}
-
-			if ($Device.GuestLastSeen -and [string]$Device.GuestLastSeen -as [DateTime] -and [DateTime]$Device.GuestLastSeen -gt $UnixDateLowLimit) {
-				$DeviceOutputObj.last_active = [DateTime]$Device.GuestLastSeen
-				$DevicesOutput += $DeviceOutputObj
-			} elseif ($Device.GuestLastActivityTime -and [string]$Device.GuestLastActivityTime -as [DateTime] -and [DateTime]$Device.GuestLastActivityTime -gt $UnixDateLowLimit) {
-				$DeviceOutputObj.last_active = [DateTime]$Device.GuestLastActivityTime
-				$DevicesOutput += $DeviceOutputObj
-			} elseif ($Device.GuestInfoUpdateTime -and [string]$Device.GuestInfoUpdateTime -as [DateTime] -and [DateTime]$Device.GuestInfoUpdateTime -gt $UnixDateLowLimit) {
-				$DeviceOutputObj.last_active = [DateTime]$Device.GuestInfoUpdateTime
-				$DevicesOutput += $DeviceOutputObj
-			} elseif ($Device.GuestLastBootTime -and [string]$Device.GuestLastBootTime -as [DateTime] -and [DateTime]$Device.GuestLastBootTime -gt $UnixDateLowLimit) {
-				$DeviceOutputObj.last_active = [DateTime]$Device.GuestLastBootTime
-				$DevicesOutput += $DeviceOutputObj
-			}
-		}
-		
-		$DevicesOutput = $DevicesOutput | Sort-Object last_active -Desc
-
-		$DevicesOutput
-		return
-	}
-
-	function compare_activity_rmm($DeviceIDs) {
-		$Now = Get-Date
-		$RMMDevices = @()
-		foreach ($DeviceID in $DeviceIDs) {
-			$RMMDevices += $RMM_DevicesHash[$DeviceID]
-		}
-
-		$DevicesOutput = @()
-
-		foreach ($Device in $RMMDevices) {
-			$DeviceOutputObj = [PsCustomObject]@{
-				type = "rmm"
-				id = $Device."Device UID"
-				last_active = $null
-			}
-
-			if ($Device.Status -eq "Online" -or $Device."Last Seen" -eq "Currently Online") {
-				$DeviceOutputObj.last_active = $Now
-				$DevicesOutput += $DeviceOutputObj
-			} elseif ($Device."Last Seen" -and [string]$Device."Last Seen" -as [DateTime]) {
-				$DeviceOutputObj.last_active = [DateTime]$Device."Last Seen"
-				$DevicesOutput += $DeviceOutputObj
-			}
-		}
-
-		$DevicesOutput = $DevicesOutput | Sort-Object last_active -Desc
-
-		$DevicesOutput
-		return
-	}
-
-	function compare_activity_sophos($DeviceIDs) {
-		$SophosDevices = @()
-		foreach ($DeviceID in $DeviceIDs) {
-			$SophosDevices += $Sophos_DevicesHash[$DeviceID]
-		}
-		$DevicesOutput = @()
-
-		foreach ($Device in $SophosDevices) {
-			$DeviceOutputObj = [PsCustomObject]@{
-				type = "sophos"
-				id = $Device.id
-				last_active = $null
-			}
-
-			if ($Device.lastSeenAt -and [string]$Device.lastSeenAt -as [DateTime]) {
-				$DeviceOutputObj.last_active = [DateTime]$Device.lastSeenAt
-				$DevicesOutput += $DeviceOutputObj
-			}
-		}
-
-		$DevicesOutput = $DevicesOutput | Sort-Object last_active -Desc
-
-		$DevicesOutput
-		return
-	}
-
-	function compare_activity_jc($DeviceIDs) {
-		$JCDevices = @()
-		foreach ($DeviceID in $DeviceIDs) {
-			$JCDevices += $JC_DevicesHash[$DeviceID]
-		}
-		$DevicesOutput = @()
-
-		foreach ($Device in $JCDevices) {
-			$DeviceOutputObj = [PsCustomObject]@{
-				type = "jc"
-				id = $Device.id
-				last_active = $null
-			}
-
-			if ($Device.lastContact -and [string]$Device.lastContact -as [DateTime]) {
-				$DeviceOutputObj.last_active = [DateTime]$Device.lastContact
-				$DevicesOutput += $DeviceOutputObj
-			}
-		}
-
-		$DevicesOutput = $DevicesOutput | Sort-Object last_active -Desc
-
-		$DevicesOutput
-		return
-	}
-
-	function compare_activity_azure($DeviceIDs) {
-		$AzureDevices = @()
-		foreach ($DeviceID in $DeviceIDs) {
-			$AzureDevices += $Azure_DevicesHash[$DeviceID]
-		}
-		$DevicesOutput = @()
-
-		foreach ($Device in $AzureDevices) {
-			$DeviceOutputObj = [PsCustomObject]@{
-				type = "azure"
-				id = $Device.id
-				last_active = $null
-			}
-
-			if ($Device.ApproximateLastSignInDateTime -and [string]$Device.ApproximateLastSignInDateTime -as [DateTime]) {
-				$DeviceOutputObj.last_active = [DateTime]$Device.ApproximateLastSignInDateTime
-				$DevicesOutput += $DeviceOutputObj
-			}
-		}
-
-		$DevicesOutput = $DevicesOutput | Sort-Object last_active -Desc
-
-		$DevicesOutput
-		return
-	}
-
-	function compare_activity_intune($DeviceIDs) {
-		$IntuneDevices = @()
-		foreach ($DeviceID in $DeviceIDs) {
-			$IntuneDevices += $Intune_DevicesHash[$DeviceID]
-		}
-		$DevicesOutput = @()
-
-		foreach ($Device in $IntuneDevices) {
-			$DeviceOutputObj = [PsCustomObject]@{
-				type = "intune"
-				id = $Device.id
-				last_active = $null
-			}
-
-			if ($Device.LastSyncDateTime -and [string]$Device.LastSyncDateTime -as [DateTime]) {
-				$DeviceOutputObj.last_active = [DateTime]$Device.LastSyncDateTime
-				$DevicesOutput += $DeviceOutputObj
-			}
-		}
-
-		$DevicesOutput = $DevicesOutput | Sort-Object last_active -Desc
-
-		$DevicesOutput
-		return
-	}
-
-	# Helper function that takes a $MatchedDevices object and returns the activity comparison for SC, RMM, Sophos, and (if applicable) Azure & Intune
-	function compare_activity($MatchedDevice) {
-		$Activity = @{}
-
-		if ($MatchedDevice.sc_matches -and $MatchedDevice.sc_matches.count -gt 0) {
-			$SCActivity = compare_activity_sc $MatchedDevice.sc_matches
-			$Activity.sc = $SCActivity | Sort-Object last_active -Descending | Select-Object -First 1
-		}
-
-		if ($MatchedDevice.rmm_matches -and $MatchedDevice.rmm_matches.count -gt 0) {
-			$RMMActivity = compare_activity_rmm $MatchedDevice.rmm_matches
-			$Activity.rmm = $RMMActivity | Sort-Object last_active -Descending | Select-Object -First 1
-		}
-
-		if ($MatchedDevice.sophos_matches -and $MatchedDevice.sophos_matches.count -gt 0) {
-			$SophosActivity = compare_activity_sophos $MatchedDevice.sophos_matches
-			$Activity.sophos = $SophosActivity | Sort-Object last_active -Descending | Select-Object -First 1
-		}
-
-		if ($JCConnected -and $MatchedDevice.jc_matches -and $MatchedDevice.jc_matches.count -gt 0) {
-			$JCActivity = compare_activity_jc $MatchedDevice.jc_matches
-			$Activity.jc = $JCActivity | Sort-Object last_active -Descending | Select-Object -First 1
-		}
-
-		if ($MatchedDevice.azure_matches -and $MatchedDevice.azure_matches.count -gt 0) {
-			$AzureActivity = compare_activity_azure $MatchedDevice.azure_matches
-			$Activity.azure = $AzureActivity | Sort-Object last_active -Descending | Select-Object -First 1
-		}
-
-		if ($MatchedDevice.intune_matches -and $MatchedDevice.intune_matches.count -gt 0) {
-			$IntuneActivity = compare_activity_intune $MatchedDevice.intune_matches
-			$Activity.intune = $IntuneActivity | Sort-Object last_active -Descending | Select-Object -First 1
-		}
-
-		$Activity
-		return
-	}
-
-	# Helper function that checks a device from the $MatchedDevices array against the $Ignore_Installs config value and returns true if it should be ignored
-	# Also ignores Sophos on Hyper-V hosts via a regex check
-	# $System should be 'sc', 'rmm', or 'sophos'
-	function ignore_install($Device, $System) {
-		if ($System -eq 'sc' -and $Ignore_Installs.SC -eq $true) {
-			return $true
-		} elseif ($System -eq 'rmm' -and $Ignore_Installs.RMM -eq $true) {
-			return $true
-		} elseif ($System -eq 'sophos' -and $Ignore_Installs.Sophos -eq $true) {
-			return $true
-		}
-
-		if ($System -eq 'sophos' -and ($Device.rmm_hostname -match $HyperVRegex -or $Device.sc_hostname -match $HyperVRegex)) {
-			return $true;
-		}
-
-		$IgnoredDevices = @()
-		if ($System -eq 'sc') {
-			$IgnoredDevices = $Ignore_Installs.SC
-		} elseif ($System -eq 'rmm') {
-			$IgnoredDevices = $Ignore_Installs.RMM
-		} elseif ($System -eq 'sophos') {
-			$IgnoredDevices = $Ignore_Installs.Sophos
-		}
-
-		if ($IgnoredDevices) {
-			if ($System -eq 'sc' -and ($IgnoredDevices | Where-Object { $_ -in $Device.rmm_hostname -or $_ -in $Device.rmm_matches -or $_ -in $Device.sophos_hostname -or $_ -in $Device.sophos_matches } | Measure-Object).Count -gt 0) {
-				return $true
-			} elseif ($System -eq 'rmm' -and ($IgnoredDevices | Where-Object { $_ -in $Device.sc_hostname -or $_ -in $Device.sc_matches -or $_ -in $Device.sophos_hostname -or $_ -in $Device.sophos_matches } | Measure-Object).Count -gt 0) {
-				return $true
-			} elseif ($System -eq 'sophos' -and ($IgnoredDevices | Where-Object { $_ -in $Device.sc_hostname -or $_ -in $Device.sc_matches -or $_ -in $Device.rmm_hostname -or $_ -in $Device.rmm_matches  } | Measure-Object).Count -gt 0) {
-				return $true
-			}
-		} else {
-			return $false
-		}
-	}
-
-	# Deletes a device from ScreenConnect
-	function delete_from_sc($SC_ID, $SCWebSession) {
-		# Get an anti-forgery token from the website
-		$Response = Invoke-WebRequest "$($SCLogin.URL)/Host#Access/All%20Machines//$SC_ID" -WebSession $SCWebSession -Method 'POST' -ContentType 'application/json'
-		$Response.RawContent -match '"antiForgeryToken":"(.+?)"' | Out-Null
-		$AntiForgeryToken = $matches[1]
-
-		if ($AntiForgeryToken) {
-			$FormBody = '[["All Machines"],[{"SessionID": "' + $SC_ID + '","EventType":21,"Data":null}]]'
-			$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/PageService.ashx/AddSessionEvents" -WebSession $SCWebSession -Headers @{"X-Anti-Forgery-Token" = $AntiForgeryToken} -Body $FormBody -Method 'POST' -ContentType 'application/json'
-			return $true
-		} else {
-			Write-Warning "Could not get an anti-forgery token from Screenconnect. Failed to delete device from SC: $SC_ID"
-			return $false
-		}
-	}
-
-	# This doesn't truly delete a device from RMM (we can't using the API), instead it sets the Delete Me UDF which adds the device into the device filter of devices we should delete
-	function delete_from_rmm($RMM_Device_ID) {
-		Set-DrmmDeviceUdf -deviceUid $RMM_Device_ID -udf30 "True"
-	}
-
-	# Deletes a device from Sophos (be careful with this, make sure it no longer is installed on the device!)
-	# Only works if using the sophos API. Pass in the same headers used for getting the endpoints.
-	function delete_from_sophos($Sophos_Device_ID, $TenantApiHost, $SophosHeader) {
-		if ($Sophos_Device_ID -and $TenantApiHost -and $SophosHeader) {
-			try {
-				$Response = Invoke-RestMethod -Method DELETE -Headers $SophosHeader -uri ($TenantApiHost + "/endpoint/v1/endpoints/$Sophos_Device_ID")
-				if ($Response.deleted -eq "True") {
-					return $true
-				}
-			} catch {
-				Write-Error "Could not auto-delete Sophos device '$Sophos_Device_ID' for the reason: " + $_.Exception.Message
-			}
-		}
-		return $false
-	}
-
-	# Deletes a device from JumpCloud
-	function delete_from_jc($JC_ID) {
-		$Deleted = $false
-		if ($JC_ID) {
-			$Deleted = Remove-JCSystem -SystemID $JC_ID -Force
-		}
-
-		if ($Deleted -and $Deleted.Results -like "Deleted") {
-			return $true
-		} else {
-			Write-Warning "Could not delete device '$($JC_ID)' from JumpCloud."
-			return $false
-		}
-	}
-
-	# Archives a configuration in ITG
-	function archive_itg($ITG_Device_ID) {
-		$UpdatedConfig = @{
-			'type' = 'configurations'
-			'attributes' = @{
-				'archived' = 'true'
-			}
-		}
-
-		try {
-			Set-ITGlueConfigurations -id $ITG_Device_ID -data $UpdatedConfig
-			return $true
-		} catch {
-			Write-Error "Could not archive ITG configuration '$ITG_Device_ID' for the reason: " + $_.Exception.Message
-			return $false
-		}
-	}
-
-	# Cleans up the name of a Manufacturer
-	function manufacturer_cleanup($Manufacturer) {
-		if ($Manufacturer) {
-			$CleanedManufacturer = $Manufacturer
-			if ($CleanedManufacturer -like "*/*") {
-				$CleanedManufacturer = ($CleanedManufacturer -split '/')[0]
-			}
-			$CleanedManufacturer = $CleanedManufacturer.Trim()
-			$CleanedManufacturer = $CleanedManufacturer -replace ",? ?(Inc\.?$|Corporation$|Corp\.?$|Co\.$|Ltd\.?$)", ""
-			$CleanedManufacturer = $CleanedManufacturer.Trim()
-			$CleanedManufacturer = $CleanedManufacturer -replace ",? ?(Inc\.?$|Corporation$|Corp\.?$|Co\.$|Ltd\.?$)", ""
-			$CleanedManufacturer = $CleanedManufacturer.Trim()
-
-			return $CleanedManufacturer
-		} else {
-			return $null
-		}
-	}
-
-	# Converts a subnet mask into a Cidr range
-	function Convert-SubnetMaskToCidr($Subnet) {
-		# From: https://codeandkeep.com/PowerShell-Get-Subnet-NetworkID/
-		$NetMaskIP = [IPAddress]$Subnet
-		$BinaryString = [String]::Empty
-		$NetMaskIP.GetAddressBytes() | ForEach-Object {
-			$BinaryString += [Convert]::ToString($_, 2)
-		}
-		return $binaryString.TrimEnd('0').Length
-	}
-
-	# Levenshtein distance function for comparing similarity between two strings
-	function Measure-StringDistance {
-		<#
-			.SYNOPSIS
-				Compute the distance between two strings using the Levenshtein distance formula.
-			
-			.DESCRIPTION
-				Compute the distance between two strings using the Levenshtein distance formula.
-
-			.PARAMETER Source
-				The source string.
-
-			.PARAMETER Compare
-				The comparison string.
-
-			.EXAMPLE
-				PS C:\> Measure-StringDistance -Source "Michael" -Compare "Micheal"
-
-				2
-
-				There are two characters that are different, "a" and "e".
-
-			.EXAMPLE
-				PS C:\> Measure-StringDistance -Source "Michael" -Compare "Michal"
-
-				1
-
-				There is one character that is different, "e".
-
-			.NOTES
-				Author:
-				Michael West
-		#>
-
-		[CmdletBinding(SupportsShouldProcess=$true)]
-		[OutputType([int])]
-		param (
-			[Parameter(ValueFromPipelineByPropertyName=$true)]
-			[string]$Source = "",
-			[string]$Compare = ""
-		)
-		$n = $Source.Length;
-		$m = $Compare.Length;
-		$d = New-Object 'int[,]' $($n+1),$($m+1)
-			
-		if ($n -eq 0){
-		return $m
-		}
-		if ($m -eq 0){
-			return $n
-		}
-
-		for ([int]$i = 0; $i -le $n; $i++){
-			$d[$i, 0] = $i
-		}
-		for ([int]$j = 0; $j -le $m; $j++){
-			$d[0, $j] = $j
-		}
-
-		for ([int]$i = 1; $i -le $n; $i++){
-			for ([int]$j = 1; $j -le $m; $j++){
-				if ($Compare[$($j - 1)] -eq $Source[$($i - 1)]){
-					$cost = 0
-				}
-				else{
-					$cost = 1
-				}
-				$d[$i, $j] = [Math]::Min([Math]::Min($($d[$($i-1), $j] + 1), $($d[$i, $($j-1)] + 1)),$($d[$($i-1), $($j-1)]+$cost))
-			}
-		}
-			
-		return $d[$n, $m]
-	}
-
 
 	# Find any duplicates that need to be removed
 	if ($DODuplicateSearch) {
@@ -2865,59 +2925,6 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		Write-Host "======================"
 	}
 
-	# Functions for installing/reinstalling SC/RMM/Sophos
-
-	# Installs RMM on a device using ScreenConnect
-	# $SC_ID the GUID of the device in screenconnect
-	# $RMM_ORG_ID the GUID of the organization in RMM (found in the organization under Settings > General > ID)
-	# $SCWebSession the web session used to authenticate with Screenconnect previously
-	function install_rmm_using_sc($SC_ID, $RMM_ORG_ID, $SCWebSession) {
-		# Get an anti-forgery token from the website
-		$Response = Invoke-WebRequest "$($SCLogin.URL)/Host#Access/All%20Machines//$SC_ID" -WebSession $SCWebSession -Method 'POST' -ContentType 'application/json'
-		$Response.RawContent -match '"antiForgeryToken":"(.+?)"' | Out-Null
-		$AntiForgeryToken = $matches[1]
-
-		if ($AntiForgeryToken) {
-			$RMMInstallCmd = "#timeout=100000\npowershell -command \`"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://$($DattoAPIKey.Region).centrastage.net/csm/profile/downloadAgent/$RMM_ORG_ID' -OutFile c:\\windows\\temp\\AEM-Installer.exe; c:\\windows\\temp\\AEM-Installer.exe /s; Write-Host 'RMM Install Complete';\`""
-
-			$FormBody = '[["All Machines"],[{"SessionID": "' + $SC_ID + '","EventType":44,"Data":"' + $RMMInstallCmd + '"}]]'
-			$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/PageService.ashx/AddSessionEvents" -WebSession $SCWebSession -Headers @{"X-Anti-Forgery-Token" = $AntiForgeryToken} -Body $FormBody -Method 'POST' -ContentType 'application/json'
-			return $true
-		} else {
-			Write-Warning "Could not get an anti-forgery token from Screenconnect. Failed to install RMM for SC device ID: $SC_ID"
-			return $false
-		}
-	}
-
-	function install_rmm_using_sc_mac($SC_ID, $RMM_ORG_ID, $SCWebSession) {
-		# Get an anti-forgery token from the website
-		$Response = Invoke-WebRequest "$($SCLogin.URL)/Host#Access/All%20Machines//$SC_ID" -WebSession $SCWebSession -Method 'POST' -ContentType 'application/json'
-		$Response.RawContent -match '"antiForgeryToken":"(.+?)"' | Out-Null
-		$AntiForgeryToken = $matches[1]
-	
-		if ($AntiForgeryToken) {
-			$RMMInstallCmd = "#timeout=100000\n#!bash\ncd /tmp\ncurl -o aem-installer.zip 'https://$($DattoAPIKey.Region).centrastage.net/csm/profile/downloadMacAgent/$RMM_ORG_ID'\nunzip -a aem-installer.zip\ncd AgentSetup\nsudo installer -pkg CAG.pkg -target /"
-	
-			$FormBody = '[["All Machines"],[{"SessionID": "' + $SC_ID + '","EventType":44,"Data":"' + $RMMInstallCmd + '"}]]'
-			$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/PageService.ashx/AddSessionEvents" -WebSession $SCWebSession -Headers @{"X-Anti-Forgery-Token" = $AntiForgeryToken} -Body $FormBody -Method 'POST' -ContentType 'application/json'
-	
-			return $true
-		} else {
-			Write-Warning "Could not get an anti-forgery token from Screenconnect. Failed to install RMM for SC device ID: $SC_ID"
-			return $false
-		}
-	}
-
-	function install_sc_using_rmm($RMM_Device) {
-		if ($RMM_Device."Operating System" -like "*Windows*") {
-			Set-DrmmDeviceQuickJob -DeviceUid $RMM_Device."Device UID" -jobName "Install ScreenConnect on $($RMM_Device."Device Hostname")" -ComponentName "ScreenConnect Install - WIN"
-			return $true
-		} elseif ($RMM_Device."Operating System" -like "*Mac OS*") {
-			Set-DrmmDeviceQuickJob -DeviceUid $RMM_Device."Device UID" -jobName "Install ScreenConnect on $($RMM_Device."Device Hostname")" -ComponentName "ScreenConnect Install - MAC"
-			return $true
-		}
-		return $false
-	}
 
 	# Get activity comparisons and store for later (so we aren't repeating this over and over)
 	if ($DOBrokenConnectionSearch -or $DOMissingConnectionSearch -or $DOInactiveSearch -or $DOUsageDBSave -or $DOBillingExport) {
@@ -6953,7 +6960,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 }
 
-# If auditing all companies we have created an overview document, lets export and excel doc of it
+# If auditing all companies we have created an overview document, lets export an excel doc of it
 if ($companies -contains "ALL" -and ($DeviceCount_Overview | Measure-Object).Count -gt 0) {
 	$MonthName = (Get-Culture).DateTimeFormat.GetMonthName([int](Get-Date -Format MM))
 	$Year = Get-Date -Format yyyy
