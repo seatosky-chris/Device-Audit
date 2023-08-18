@@ -463,7 +463,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		Write-PSFMessage -Level Error -Message "Error: $Response"
 	}
 
-	# Get RMM device details if using the API
+	# Get RMM device details if using the API (or grab from cache)
 	if ($RMM_Devices) {
 		if (!(Test-Path -Path $RMMDeviceDetailsLocation)) {
 			New-Item -ItemType Directory -Force -Path $RMMDeviceDetailsLocation | Out-Null
@@ -494,7 +494,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			if ($RMMDeviceDetailsCache.($Device.uid)) {
 				$CacheAge = New-TimeSpan -Start (Get-Date $RMMDeviceDetailsCache.($Device.uid).lastUpdated) -End $CurrentDate
 				if ($CacheAge.Days -ge 7) {
-					# Remove cache entry
+					$RMMDeviceDetailsCache.PSObject.Properties.Remove($Device.uid)
 				} else {
 					$LoadFromCache = $true
 				}
