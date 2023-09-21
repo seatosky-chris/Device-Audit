@@ -1382,8 +1382,11 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 			$LoadFromCache = $false
 			if ($RMMDeviceDetailsCache.($Device.uid)) {
-				$CacheAge = New-TimeSpan -Start (Get-Date $RMMDeviceDetailsCache.($Device.uid).lastUpdated) -End $CurrentDate
-				if ($CacheAge.Days -ge 7) {
+				$CacheAge = $false
+				if ($RMMDeviceDetailsCache.($Device.uid).lastUpdated) {
+					$CacheAge = New-TimeSpan -Start (Get-Date $RMMDeviceDetailsCache.($Device.uid).lastUpdated) -End $CurrentDate
+				}
+				if (!$CacheAge -or $CacheAge.Days -ge 7) {
 					$RMMDeviceDetailsCache.PSObject.Properties.Remove($Device.uid)
 				} else {
 					$LoadFromCache = $true
@@ -1392,11 +1395,24 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 			if (!$LoadFromCache) {
 				$AuditDevice = Get-DrmmAuditDevice $Device.uid
-				$RMMDeviceDetailsCache.($Device.uid) = $AuditDevice
-				if (!$RMMDeviceDetailsCache.($Device.uid).lastUpdated) {
-					$RMMDeviceDetailsCache.($Device.uid) | Add-Member -NotePropertyName lastUpdated -NotePropertyValue $false
+				if ($AuditDevice) {
+					if (!$RMMDeviceDetailsCache.($Device.uid)) {
+						if ($RMMDeviceDetailsCache.GetType().Name -like "Hashtable") {
+							$RMMDeviceDetailsCache.($Device.uid) = $false
+						} else {
+							$RMMDeviceDetailsCache | Add-Member -NotePropertyName $Device.uid -NotePropertyValue $false
+						}
+					}
+					$RMMDeviceDetailsCache.($Device.uid) = $AuditDevice
+					if (!$RMMDeviceDetailsCache.($Device.uid).lastUpdated) {
+						if ($RMMDeviceDetailsCache.($Device.uid).GetType().Name -like "Hashtable") {
+							$RMMDeviceDetailsCache.($Device.uid).lastUpdated = $false
+						} else {
+							$RMMDeviceDetailsCache.($Device.uid) | Add-Member -NotePropertyName lastUpdated -NotePropertyValue $false
+						}
+					}
+					$RMMDeviceDetailsCache.($Device.uid).lastUpdated = $CurrentDate
 				}
-				$RMMDeviceDetailsCache.($Device.uid).lastUpdated = $CurrentDate
 			} else {
 				$CachedDevice = $RMMDeviceDetailsCache.($Device.uid)
 			}
