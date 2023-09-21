@@ -2639,7 +2639,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		Write-Host "Exported the matched devices json file."
 
 		# Delete any old matched devices json files
-		Get-ChildItem $MatchedDevicesLocation | Where-Object { $_.Name -Match "$($Company_Acronym)_matched_devices_\d{4}_\d{2}_\d{2}\.json" -and $_.FullName -ne $MatchedDevicesJsonPath -and !$_.PSIsContainer } | Remove-Item
+		Get-ChildItem $MatchedDevicesLocation | Where-Object { $_.Name -Match "^$($Company_Acronym)_matched_devices_\d{4}_\d{2}_\d{2}\.json" -and $_.FullName -ne $MatchedDevicesJsonPath -and !$_.PSIsContainer } | Remove-Item
 	}
 
 	Write-Host "Matching Complete!"
