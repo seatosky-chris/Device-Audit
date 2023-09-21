@@ -23,3 +23,10 @@ To setup the **Azure/Intune connection**, you will need to configure an Azure ap
 When running the basic DeviceAudit script you can choose the config file by changing line 9 at the top of the script. The DeviceAudit-Automated script is similar but can be used from the command line and does not have a GUI. For this script you can set the company or multiple companies using the `companies` flag. E.g. `DeviceAudit-Automated.ps1 -companies STS, AVA, MV`. You can also set the `companies` flag to `ALL` to audit all customers at once. The company acronym used for the `companies` flag should be the CompanyAcronym portion of the "Config-CompanyAcronym.ps1" file. The DeviceAudit-Automated script is gui-less but will send emails for warnings and billing reports. The script can (and should) be ran daily to keep accurate usage logs and as such won't always send a billing report email. By default, it will send one billing report email during the last week of the month.
 
 To automate the device audits I run a task schedule that runs 3x a day (10AM, 1PM, 4PM). The command is: `PowerShell.exe -ExecutionPolicy Bypass -File "C:\seatosky\Device Audit\DeviceAudit-Automated.ps1" -companies ALL` The script handles the rest!
+
+# Device Audit - Broken Down Version
+There are 3 extra broken down copies of the Automated device audit that all do a piece of the audit. This is a WIP. The main script has gotten too big so my hope is to break it down into pieces. The scripts must be ran in the following order:
+
+1. The Initialize script should be run first thing in the morning and will perform the device matching.
+2. The Start Cleanup script should be ran next. It will perform a full cleanup and queue any installs it cant perform at this time.
+3. The Recurring Cleanup can then be ran periodically throughout the rest of the day, it should run fairly quickly. It will save usage data and attempt any installs in the queue.
