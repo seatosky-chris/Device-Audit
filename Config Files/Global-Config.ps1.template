@@ -235,6 +235,15 @@ $MatchedDevicesLocation = "C:\Users\Administrator\Documents\DeviceAuditMatchedDe
 $RMMDeviceDetailsLocation = "C:\Users\Administrator\Documents\RMMDeviceDetails"
 
 ####################
+# $InstallQueueLocation
+#
+# The location to store a list of devices that need sc or rmm installed (but we haven't successfully auto installed it on them yet)
+#
+# Example: $InstallQueueLocation = "C:\Users\Administrator\Documents\InstallQueue"
+#
+$InstallQueueLocation = "C:\Users\Administrator\Documents\InstallQueue"
+
+####################
 # $HistoryLocation
 #
 # The location to store history files of the device audit (can be used by other scripts to get usage stats, who uses which computer, etc.)

@@ -850,6 +850,93 @@ if ($true) {
 		return
 	}
 
+	# Adds a device to the install queue json file (creates the file if need be)
+	# Either set $SC_ID or $RMM_ID, this is the device used for the install
+	# Set $ToInstall to what needs to be installed ("sc", or "rmm")
+	function add_device_to_install_queue($SC_ID = $false, $RMM_ID = $false, $ToInstall = $false) {
+		$FromDeviceType = $false
+		if ($SC_ID) {
+			$FromDeviceType = "sc"
+		} elseif ($RMM_ID) {
+			$FromDeviceType = "rmm"
+		} else {
+			return $false
+		}
+
+		if (!$ToInstall) { return $false }
+
+		$InstallQueue = [PSCustomObject]@{}
+		if (Test-Path $InstallQueuePath) {
+			$InstallQueue = Get-Content -Path $InstallQueuePath -Raw | ConvertFrom-Json
+			if (!$InstallQueue) {
+				$InstallQueue = [PSCustomObject]@{}
+			}
+		}
+		
+		if (!$InstallQueue.PSObject.Properties -or $InstallQueue.PSObject.Properties.Name -notcontains $ToInstall) {
+			$InstallQueue | Add-Member -NotePropertyName $ToInstall -NotePropertyValue $false
+			$InstallQueue.($ToInstall) = [PSCustomObject]@{}
+		}
+
+		if (!$InstallQueue.($ToInstall).PSObject.Properties -or $InstallQueue.($ToInstall).PSObject.Properties.Name -notcontains $FromDeviceType) {
+			$InstallQueue.($ToInstall) | Add-Member -NotePropertyName $FromDeviceType -NotePropertyValue @()
+		}
+
+		$InstallQueue.($ToInstall).($FromDeviceType) += if ($FromDeviceType -eq "sc") { $SC_ID } else { $RMM_ID }
+
+		if ($InstallQueue -and $InstallQueuePath) {
+			$InstallQueue | ConvertTo-Json -Depth 5 | Out-File -FilePath $InstallQueuePath
+		}
+
+		return $true
+	}
+
+	# Removes a device from the install queue json file
+	# Either set $SC_ID or $RMM_ID, this is the device used for the install
+	# Set $ToInstall to what needed to be installed ("sc" or "rmm"), if left $false will remove for all $ToInstall types
+	function remove_device_from_install_queue($SC_ID = $false, $RMM_ID = $false, $ToInstall = $false) {
+		$FromDeviceType = $false
+		if ($SC_ID) {
+			$FromDeviceType = "sc"
+		} elseif ($RMM_ID) {
+			$FromDeviceType = "rmm"
+		} else {
+			return $false
+		}
+
+		$InstallQueue = [PSCustomObject]@{}
+		if (Test-Path $InstallQueuePath) {
+			$InstallQueue = Get-Content -Path $InstallQueuePath -Raw | ConvertFrom-Json
+			if (!$InstallQueue) {
+				$InstallQueue = [PSCustomObject]@{}
+			}
+		}
+
+		if ($ToInstall -and $InstallQueue.PSObject.Properties -and $InstallQueue.PSObject.Properties.Name -contains $ToInstall -and $InstallQueue.($ToInstall).PSObject.Properties -and $InstallQueue.($ToInstall).PSObject.Properties.Name -contains $FromDeviceType) {
+			if ($FromDeviceType -eq "sc") {
+				$InstallQueue.($ToInstall).($FromDeviceType) = @($InstallQueue.($ToInstall).($FromDeviceType) | Where-Object { $_ -notlike $SC_ID })
+			} else {
+				$InstallQueue.($ToInstall).($FromDeviceType) = @($InstallQueue.($ToInstall).($FromDeviceType) | Where-Object { $_ -notlike $RMM_ID })
+			}
+		} elseif (!$ToInstall -and $InstallQueue.PSObject.Properties) {
+			foreach ($InstallType in $InstallQueue.PSObject.Properties.Name) {
+				if ($InstallQueue.($InstallType).PSObject.Properties -and $InstallQueue.($InstallType).PSObject.Properties.Name -contains $FromDeviceType) {
+					if ($FromDeviceType -eq "sc") {
+						$InstallQueue.($InstallType).($FromDeviceType) = @($InstallQueue.($InstallType).($FromDeviceType) | Where-Object { $_ -notlike $SC_ID })
+					} else {
+						$InstallQueue.($InstallType).($FromDeviceType) = @($InstallQueue.($InstallType).($FromDeviceType) | Where-Object { $_ -notlike $RMM_ID })
+					}
+				}
+			}
+		}
+
+		if ($InstallQueue -and $InstallQueuePath) {
+			$InstallQueue | ConvertTo-Json -Depth 5 | Out-File -FilePath $InstallQueuePath
+		}
+
+		return $true
+	}
+
 	# Helper function that checks a device from the $MatchedDevices array against the $Ignore_Installs config value and returns true if it should be ignored
 	# Also ignores Sophos on Hyper-V hosts via a regex check
 	# $System should be 'sc', 'rmm', or 'sophos'
@@ -898,6 +985,7 @@ if ($true) {
 		if ($AntiForgeryToken) {
 			$FormBody = '[["All Machines"],[{"SessionID": "' + $SC_ID + '","EventType":21,"Data":null}]]'
 			$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/PageService.ashx/AddSessionEvents" -WebSession $SCWebSession -Headers @{"X-Anti-Forgery-Token" = $AntiForgeryToken} -Body $FormBody -Method 'POST' -ContentType 'application/json'
+			remove_device_from_install_queue -SC_ID $SC_ID -ToInstall $false
 			return $true
 		} else {
 			Write-Warning "Could not get an anti-forgery token from Screenconnect. Failed to delete device from SC: $SC_ID"
@@ -908,6 +996,7 @@ if ($true) {
 	# This doesn't truly delete a device from RMM (we can't using the API), instead it sets the Delete Me UDF which adds the device into the device filter of devices we should delete
 	function delete_from_rmm($RMM_Device_ID) {
 		Set-DrmmDeviceUdf -deviceUid $RMM_Device_ID -udf30 "True"
+		remove_device_from_install_queue -RMM_ID $RMM_Device_ID -ToInstall $false
 	}
 
 	# Deletes a device from Sophos (be careful with this, make sure it no longer is installed on the device!)
@@ -1080,6 +1169,7 @@ if ($true) {
 
 			$FormBody = '[["All Machines"],[{"SessionID": "' + $SC_ID + '","EventType":44,"Data":"' + $RMMInstallCmd + '"}]]'
 			$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/PageService.ashx/AddSessionEvents" -WebSession $SCWebSession -Headers @{"X-Anti-Forgery-Token" = $AntiForgeryToken} -Body $FormBody -Method 'POST' -ContentType 'application/json'
+			remove_device_from_install_queue -SC_ID $SC_ID -ToInstall "rmm"
 			return $true
 		} else {
 			Write-Warning "Could not get an anti-forgery token from Screenconnect. Failed to install RMM for SC device ID: $SC_ID"
@@ -1098,7 +1188,8 @@ if ($true) {
 	
 			$FormBody = '[["All Machines"],[{"SessionID": "' + $SC_ID + '","EventType":44,"Data":"' + $RMMInstallCmd + '"}]]'
 			$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/PageService.ashx/AddSessionEvents" -WebSession $SCWebSession -Headers @{"X-Anti-Forgery-Token" = $AntiForgeryToken} -Body $FormBody -Method 'POST' -ContentType 'application/json'
-	
+			remove_device_from_install_queue -SC_ID $SC_ID -ToInstall "rmm"
+
 			return $true
 		} else {
 			Write-Warning "Could not get an anti-forgery token from Screenconnect. Failed to install RMM for SC device ID: $SC_ID"
@@ -1109,9 +1200,11 @@ if ($true) {
 	function install_sc_using_rmm($RMM_Device) {
 		if ($RMM_Device."Operating System" -like "*Windows*") {
 			Set-DrmmDeviceQuickJob -DeviceUid $RMM_Device."Device UID" -jobName "Install ScreenConnect on $($RMM_Device."Device Hostname")" -ComponentName "ScreenConnect Install - WIN"
+			remove_device_from_install_queue -RMM_ID $RMM_Device."Device UID" -ToInstall "sc"
 			return $true
 		} elseif ($RMM_Device."Operating System" -like "*Mac OS*") {
 			Set-DrmmDeviceQuickJob -DeviceUid $RMM_Device."Device UID" -jobName "Install ScreenConnect on $($RMM_Device."Device Hostname")" -ComponentName "ScreenConnect Install - MAC"
+			remove_device_from_install_queue -RMM_ID $RMM_Device."Device UID" -ToInstall "sc"
 			return $true
 		}
 		return $false
@@ -2553,6 +2646,12 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		$LogHistory = @{}
 	}
 
+	# Prepare install queue
+	if (!(Test-Path -Path $InstallQueueLocation)) {
+		New-Item -ItemType Directory -Force -Path $InstallQueueLocation | Out-Null
+	}
+	$InstallQueuePath = "$($InstallQueueLocation)\$($Company_Acronym)_install_queue.json"
+
 
 	# Find any duplicates that need to be removed
 	if ($DODuplicateSearch) {
@@ -2967,7 +3066,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		$MatchedDevicesHash[$Device.id] = $Device
 	}
 
-	# Find broken device connections (e.g. online recently in ScreenConnect but no in RMM)
+	# Find broken device connections (e.g. online recently in ScreenConnect but not in RMM)
 	if ($DOBrokenConnectionSearch) {
 		Write-Host "Searching for broken connections..."
 		$BrokenConnections = @()
@@ -3027,7 +3126,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 								$SC_Device += $SC_DevicesHash[$DeviceID]
 							}
 							
-							# Only continue of the device was seen recently in SC (this will only work if it is active) and is using Windows
+							# Only continue if the device was seen recently in SC (this will only work if it is active) and is using Windows
 							foreach ($SCDevice in $SC_Device) {
 								$LogParams = @{
 									ServiceTarget = "sc"
@@ -3041,17 +3140,25 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 								$LogParams.Sophos_Device_ID = $Device.sophos_matches
 								$LogParams.Reason = "RMM connection broken"
 
-								if ($SCDevice.GuestOperatingSystemName -like "*Windows*" -and $SCDevice.GuestOperatingSystemName -notlike "*Windows Embedded*" -and $SCDevice.GuestLastSeen -gt (Get-Date).AddHours(-3)) {
-									if (install_rmm_using_sc -SC_ID $SCDevice.SessionID -RMM_ORG_ID $RMM_ID -SCWebSession $SCWebSession) {
-										$AutoFix = $true
-										check_failed_attempts @LogParams -LogHistory $LogHistory -Company_Acronym $Company_Acronym -ErrorMessage $EmailError
-										log_change @LogParams -Company_Acronym $Company_Acronym
+								if ($SCDevice.GuestOperatingSystemName -like "*Windows*" -and $SCDevice.GuestOperatingSystemName -notlike "*Windows Embedded*") {
+									if ($SCDevice.GuestLastSeen -gt (Get-Date).AddHours(-3)) {
+										if (install_rmm_using_sc -SC_ID $SCDevice.SessionID -RMM_ORG_ID $RMM_ID -SCWebSession $SCWebSession) {
+											$AutoFix = $true
+											check_failed_attempts @LogParams -LogHistory $LogHistory -Company_Acronym $Company_Acronym -ErrorMessage $EmailError
+											log_change @LogParams -Company_Acronym $Company_Acronym
+										}
+									} else {
+										add_device_to_install_queue -SC_ID $SCDevice.SessionID -ToInstall 'rmm'
 									}
-								} elseif ($SCDevice.GuestOperatingSystemName -like "*Mac OS*" -and $SCDevice.GuestLastSeen -gt (Get-Date).AddHours(-3)) {
-									if (install_rmm_using_sc_mac -SC_ID $SCDevice.SessionID -RMM_ORG_ID $RMM_ID -SCWebSession $SCWebSession) {
-										$AutoFix = $true
-										check_failed_attempts @LogParams -LogHistory $LogHistory -Company_Acronym $Company_Acronym -ErrorMessage $EmailError
-										log_change @LogParams -Company_Acronym $Company_Acronym
+								} elseif ($SCDevice.GuestOperatingSystemName -like "*Mac OS*") {
+									if ($SCDevice.GuestLastSeen -gt (Get-Date).AddHours(-3)) {
+										if (install_rmm_using_sc_mac -SC_ID $SCDevice.SessionID -RMM_ORG_ID $RMM_ID -SCWebSession $SCWebSession) {
+											$AutoFix = $true
+											check_failed_attempts @LogParams -LogHistory $LogHistory -Company_Acronym $Company_Acronym -ErrorMessage $EmailError
+											log_change @LogParams -Company_Acronym $Company_Acronym
+										}
+									} else {
+										add_device_to_install_queue -SC_ID $SCDevice.SessionID -ToInstall 'rmm'
 									}
 								} 
 							}
@@ -3064,25 +3171,29 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 								$RMM_Device += $RMM_DevicesHash[$DeviceID]
 							}
 	
-							# Only continue of the device was seen in RMM in the last 24 hours
+							# Only continue if the device was seen in RMM in the last 24 hours
 							foreach ($RMMDevice in $RMM_Device) {
-								if ($RMMDevice.suspended -ne "True" -and ($RMMDevice.Status -eq "Online" -or $RMMDevice."Last Seen" -eq "Currently Online" -or ($RMMDevice."Last Seen" -as [DateTime]) -gt (Get-Date).AddHours(-24))) {
-									if (install_sc_using_rmm -RMM_Device $RMMDevice) {
-										$LogParams = @{
-											ServiceTarget = "rmm"
-											RMM_Device_ID = $RMMDevice."Device UID"
-											ChangeType = "install_sc"
-											Hostname = $RMMDevice."Device Hostname"
+								if ($RMMDevice.suspended -ne "True") {
+									if ($RMMDevice.Status -eq "Online" -or $RMMDevice."Last Seen" -eq "Currently Online" -or ($RMMDevice."Last Seen" -as [DateTime]) -gt (Get-Date).AddHours(-24)) {
+										if (install_sc_using_rmm -RMM_Device $RMMDevice) {
+											$LogParams = @{
+												ServiceTarget = "rmm"
+												RMM_Device_ID = $RMMDevice."Device UID"
+												ChangeType = "install_sc"
+												Hostname = $RMMDevice."Device Hostname"
+											}
+											$AttemptCount = log_attempt_count @LogParams -LogHistory $LogHistory
+											$EmailError = "ScreenConnect is broken on $($LogParams.Hostname). The Device Audit script has tried to reinstall SC via RMM $AttemptCount times now but it has not succeeded."
+											$LogParams.SC_Device_ID = $Device.sc_matches
+											$LogParams.Sophos_Device_ID = $Device.sophos_matches
+											$LogParams.Reason = "SC connection broken"
+		
+											$AutoFix = $true
+											check_failed_attempts @LogParams -LogHistory $LogHistory -Company_Acronym $Company_Acronym -ErrorMessage $EmailError
+											log_change @LogParams -Company_Acronym $Company_Acronym
 										}
-										$AttemptCount = log_attempt_count @LogParams -LogHistory $LogHistory
-										$EmailError = "ScreenConnect is broken on $($LogParams.Hostname). The Device Audit script has tried to reinstall SC via RMM $AttemptCount times now but it has not succeeded."
-										$LogParams.SC_Device_ID = $Device.sc_matches
-										$LogParams.Sophos_Device_ID = $Device.sophos_matches
-										$LogParams.Reason = "SC connection broken"
-	
-										$AutoFix = $true
-										check_failed_attempts @LogParams -LogHistory $LogHistory -Company_Acronym $Company_Acronym -ErrorMessage $EmailError
-										log_change @LogParams -Company_Acronym $Company_Acronym
+									} else {
+										add_device_to_install_queue -RMM_ID $RMMDevice."Device UID" -ToInstall 'sc'
 									}
 								}
 							}
@@ -3281,17 +3392,25 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 							$LogParams.Sophos_Device_ID = $SophosDeviceIDs
 							$LogParams.Reason = "RMM not installed"
 
-							if ($SCDevice.GuestOperatingSystemName -like "*Windows*" -and $SCDevice.GuestOperatingSystemName -notlike "*Windows Embedded*" -and $SCDevice.GuestLastSeen -gt (Get-Date).AddHours(-3)) {
-								if (install_rmm_using_sc -SC_ID $SCDevice.SessionID -RMM_ORG_ID $RMM_ID -SCWebSession $SCWebSession) {
-									$AutoFix = $true
-									check_failed_attempts @LogParams -LogHistory $LogHistory -Company_Acronym $Company_Acronym -ErrorMessage $EmailError
-									log_change @LogParams -Company_Acronym $Company_Acronym
+							if ($SCDevice.GuestOperatingSystemName -like "*Windows*" -and $SCDevice.GuestOperatingSystemName -notlike "*Windows Embedded*") {
+								if ($SCDevice.GuestLastSeen -gt (Get-Date).AddHours(-3)) {
+									if (install_rmm_using_sc -SC_ID $SCDevice.SessionID -RMM_ORG_ID $RMM_ID -SCWebSession $SCWebSession) {
+										$AutoFix = $true
+										check_failed_attempts @LogParams -LogHistory $LogHistory -Company_Acronym $Company_Acronym -ErrorMessage $EmailError
+										log_change @LogParams -Company_Acronym $Company_Acronym
+									}
+								} else {
+									add_device_to_install_queue -SC_ID $SCDevice.SessionID -ToInstall 'rmm'
 								}
-							} elseif ($SCDevice.GuestOperatingSystemName -like "*Mac OS*" -and $SCDevice.GuestLastSeen -gt (Get-Date).AddHours(-3)) {
-								if (install_rmm_using_sc_mac -SC_ID $SCDevice.SessionID -RMM_ORG_ID $RMM_ID -SCWebSession $SCWebSession) {
-									$AutoFix = $true
-									check_failed_attempts @LogParams -LogHistory $LogHistory -Company_Acronym $Company_Acronym -ErrorMessage $EmailError
-									log_change @LogParams -Company_Acronym $Company_Acronym
+							} elseif ($SCDevice.GuestOperatingSystemName -like "*Mac OS*") {
+								if ($SCDevice.GuestLastSeen -gt (Get-Date).AddHours(-3)) {
+									if (install_rmm_using_sc_mac -SC_ID $SCDevice.SessionID -RMM_ORG_ID $RMM_ID -SCWebSession $SCWebSession) {
+										$AutoFix = $true
+										check_failed_attempts @LogParams -LogHistory $LogHistory -Company_Acronym $Company_Acronym -ErrorMessage $EmailError
+										log_change @LogParams -Company_Acronym $Company_Acronym
+									}
+								} else {
+									add_device_to_install_queue -SC_ID $SCDevice.SessionID -ToInstall 'rmm'
 								}
 							}
 						}
@@ -3301,23 +3420,27 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						# Device missing in sc but is in RMM and we are using the rmm api, and this device is not in the $MoveDevices array (devices that look like they dont belong)
 						# Only continue of the device was seen in RMM in the last 24 hours
 						foreach ($RMMDevice in $RMMDevices) {
-							if ($RMMDevice.suspended -ne "True" -and ($RMMDevice.Status -eq "Online" -or $RMMDevice."Last Seen" -eq "Currently Online" -or ($RMMDevice."Last Seen" -as [DateTime]) -gt (Get-Date).AddHours(-24))) {
-								if (install_sc_using_rmm -RMM_Device $RMMDevice) {
-									$LogParams = @{
-										ServiceTarget = "rmm"
-										RMM_Device_ID = $RMMDevice."Device UID"
-										ChangeType = "install_sc"
-										Hostname = $RMMDevice."Device Hostname"
+							if ($RMMDevice.suspended -ne "True") {
+								if ($RMMDevice.Status -eq "Online" -or $RMMDevice."Last Seen" -eq "Currently Online" -or ($RMMDevice."Last Seen" -as [DateTime]) -gt (Get-Date).AddHours(-24)) {
+									if (install_sc_using_rmm -RMM_Device $RMMDevice) {
+										$LogParams = @{
+											ServiceTarget = "rmm"
+											RMM_Device_ID = $RMMDevice."Device UID"
+											ChangeType = "install_sc"
+											Hostname = $RMMDevice."Device Hostname"
+										}
+										$AttemptCount = log_attempt_count @LogParams -LogHistory $LogHistory
+										$EmailError = "ScreenConnect is not installed on $($LogParams.Hostname). The Device Audit script has tried to install SC via RMM $AttemptCount times now but it has not succeeded."
+										$LogParams.SC_Device_ID = $SCDeviceIDs
+										$LogParams.Sophos_Device_ID = $SophosDeviceIDs
+										$LogParams.Reason = "SC not installed"
+		
+										$AutoFix = $true
+										check_failed_attempts @LogParams -LogHistory $LogHistory -Company_Acronym $Company_Acronym -ErrorMessage $EmailError
+										log_change @LogParams -Company_Acronym $Company_Acronym
 									}
-									$AttemptCount = log_attempt_count @LogParams -LogHistory $LogHistory
-									$EmailError = "ScreenConnect is not installed on $($LogParams.Hostname). The Device Audit script has tried to install SC via RMM $AttemptCount times now but it has not succeeded."
-									$LogParams.SC_Device_ID = $SCDeviceIDs
-									$LogParams.Sophos_Device_ID = $SophosDeviceIDs
-									$LogParams.Reason = "SC not installed"
-	
-									$AutoFix = $true
-									check_failed_attempts @LogParams -LogHistory $LogHistory -Company_Acronym $Company_Acronym -ErrorMessage $EmailError
-									log_change @LogParams -Company_Acronym $Company_Acronym
+								} else {
+									add_device_to_install_queue -RMM_ID $RMMDevice."Device UID" -ToInstall 'sc'
 								}
 							}
 						}
