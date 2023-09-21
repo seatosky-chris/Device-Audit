@@ -619,6 +619,10 @@ if ($true) {
 	# Each returns an ordered list with the type (rmm, sc, or sophos), device ID and last active date, ordered with newest first, $null if no date
 	$UnixDateLowLimit = Get-Date -Year 1970 -Month 1 -Day 1 -Hour 0 -Minute 0 -Second 0
 	function compare_activity_sc($DeviceIDs) {
+		if (!$SC_DevicesHash) {
+			return @()
+		}
+
 		$SCDevices = @()
 		foreach ($DeviceID in $DeviceIDs) {
 			$SCDevices += $SC_DevicesHash[$DeviceID]
@@ -654,6 +658,10 @@ if ($true) {
 	}
 
 	function compare_activity_rmm($DeviceIDs) {
+		if (!$RMM_DevicesHash) {
+			return @()
+		}
+
 		$Now = Get-Date
 		$RMMDevices = @()
 		foreach ($DeviceID in $DeviceIDs) {
@@ -685,6 +693,10 @@ if ($true) {
 	}
 
 	function compare_activity_sophos($DeviceIDs) {
+		if (!$Sophos_DevicesHash) {
+			return @()
+		}
+
 		$SophosDevices = @()
 		foreach ($DeviceID in $DeviceIDs) {
 			$SophosDevices += $Sophos_DevicesHash[$DeviceID]
@@ -711,6 +723,10 @@ if ($true) {
 	}
 
 	function compare_activity_jc($DeviceIDs) {
+		if (!$JC_DevicesHash) {
+			return @()
+		}
+
 		$JCDevices = @()
 		foreach ($DeviceID in $DeviceIDs) {
 			$JCDevices += $JC_DevicesHash[$DeviceID]
@@ -737,6 +753,10 @@ if ($true) {
 	}
 
 	function compare_activity_azure($DeviceIDs) {
+		if (!$Azure_DevicesHash) {
+			return @()
+		}
+
 		$AzureDevices = @()
 		foreach ($DeviceID in $DeviceIDs) {
 			$AzureDevices += $Azure_DevicesHash[$DeviceID]
@@ -763,6 +783,10 @@ if ($true) {
 	}
 
 	function compare_activity_intune($DeviceIDs) {
+		if (!$Intune_DevicesHash) {
+			return @()
+		}
+
 		$IntuneDevices = @()
 		foreach ($DeviceID in $DeviceIDs) {
 			$IntuneDevices += $Intune_DevicesHash[$DeviceID]
@@ -2931,7 +2955,9 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		foreach ($Device in $MatchedDevices) {
 			$ActivityComparison = compare_activity($Device)
 			$ActivityComparison.Values = @($ActivityComparison.Values)
-			$Device | Add-Member -NotePropertyName activity_comparison -NotePropertyValue $null
+			if (!$Device.activity_comparison) {
+				$Device | Add-Member -NotePropertyName activity_comparison -NotePropertyValue $null
+			}
 			$Device.activity_comparison = $ActivityComparison
 		}
 	}
