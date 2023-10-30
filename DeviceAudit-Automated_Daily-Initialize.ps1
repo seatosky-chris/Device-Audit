@@ -2188,6 +2188,145 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		}
 	}
 
+	# Save Sophos Tamper Protection keys (once a week)
+	$SophosTamperKeysJson = $SophosTamperKeys = @()
+	if ($Sophos_Company -and $Sophos_Devices -and $SophosTenantID -and $TenantApiHost) {
+		$SophosTamperKeysJsonPath = "$($SophosTamperKeysLocation)\$($Company_Acronym)_keys.json"
+		if ($SophosTamperKeysLocation -and (Test-Path -Path $SophosTamperKeysJsonPath)) {
+			$SophosTamperKeysJson = Get-Content -Path $SophosTamperKeysJsonPath -Raw | ConvertFrom-Json
+		}
+		$AllowTamperProtectionDisabled = $false
+		if ($Allow_Tamper_Protection_Disabled.count -gt 0 -and $Allow_Tamper_Protection_Disabled[0] -eq "*") {
+			$AllowTamperProtectionDisabled = $true
+		}
+
+		if (!$SophosTamperKeysJson -or (Get-Date $SophosTamperKeysJson.lastUpdated.DateTime).AddDays(7) -lt (Get-Date)) {
+			$SophosTamperKeys = [System.Collections.ArrayList]@()
+
+			$SophosDeviceCount = ($Sophos_Devices | Measure-Object).Count
+			$i = 0
+			$SophosFailedSleepTime = 0
+			$MaxFailTime = 180000 # 3 minutes
+			$FailsInARow = 0
+			:foreachSophosDevice foreach ($Device in $Sophos_Devices) {
+				$i++
+				[int]$PercentComplete = ($i / $SophosDeviceCount * 100)
+				Write-Progress -Activity "Retrieving Sophos Tamper Protection Keys" -PercentComplete $PercentComplete -Status ("Working - " + $PercentComplete + "%")
+
+				# Refresh token if it has expired
+				if ($SophosToken.expiry -lt (Get-Date)) {
+					try {
+						$SophosToken = Invoke-RestMethod -Method POST -Body $SophosGetTokenBody -ContentType "application/x-www-form-urlencoded" -uri "https://id.sophos.com/api/v2/oauth2/token"
+						$SophosJWT = $SophosToken.access_token
+						$SophosToken | Add-Member -NotePropertyName expiry -NotePropertyValue $null
+						$SophosToken.expiry = (Get-Date).AddSeconds($SophosToken.expires_in)
+					} catch {
+						$SophosToken = $false
+					}
+				}
+
+				if (!$SophosToken) {
+					$FailsInARow++
+					if ($FailsInARow -gt 10) {
+						break
+					}
+					continue;
+				}
+				$FailsInARow = 0
+
+				$SophosHeader = @{
+					Authorization = "Bearer $SophosJWT"
+					"X-Tenant-ID" = $SophosTenantID
+				}
+
+				$SophosTamperInfo = $false
+				$attempt = 0
+				while (!$SophosTamperInfo -and $SophosFailedSleepTime -lt $MaxFailTime) {
+					try {
+						$SophosTamperInfo = Invoke-RestMethod -Method GET -Headers $SophosHeader -uri ($TenantApiHost + "/endpoint/v1/endpoints/$($Device.id)/tamper-protection")
+					} catch {
+						if ($_.Exception.Response.StatusCode.value__ -eq 429 -or $_.Exception.Response.StatusCode.value__ -match "5\d{2}") {
+							Write-Host "Retry Sophos API call."
+							Write-Host "StatusCode:" $_.Exception.Response.StatusCode.value__ 
+							Write-Host "StatusDescription:" $_.Exception.Response.StatusDescription
+							$SophosTamperInfo = $false
+
+							$backoff = Get-Random -Minimum 0 -Maximum (@(30000, (1000 * [Math]::Pow(2, $attempt)))| Measure-Object -Minimum).Minimum
+							$attempt++
+							$SophosFailedSleepTime += $backoff
+							Write-Host "Sleep for: $([int]$backoff)"
+							Start-Sleep -Milliseconds ([int]$backoff)
+						}
+					}
+				}
+
+				if ($SophosFailedSleepTime -ge $MaxFailTime) {
+					break foreachSophosDevice
+				}
+
+				if ($SophosTamperInfo -and $SophosTamperInfo.password) {
+					$SophosTamperKeys.Add([PsCustomObject]@{
+						id = $Device.id
+						password = $SophosTamperInfo.password
+						enabled = $SophosTamperInfo.enabled
+					}) | Out-Null;
+				}
+
+				if (!$SophosTamperInfo.enabled) {
+					# Sophos tamper protection is not enabled, has it been disabled for more than a week?
+					$OneMonthAgo = [int](New-TimeSpan -Start (Get-Date "01/01/1970") -End (Get-Date).AddDays(-30).ToUniversalTime()).TotalSeconds
+					$OneWeek = [int](New-TimeSpan -Start (Get-Date).AddDays(-7).ToUniversalTime() -End (Get-Date).ToUniversalTime()).TotalSeconds
+	
+					$FilterQuery_Params = @{
+						LogHistory = $LogHistory
+						StartTime = $OneMonthAgo
+						EndTime = 'now'
+						ServiceTarget = 'sophos'
+						Sophos_Device_ID = $Device.id
+						ChangeType = 'sophos_tamper_disabled'
+						Hostname = $Device.hostname
+						Reason = "Sophos Tamper Protection is Disabled"
+					}
+					$TamperProtectionDisabled = log_query @FilterQuery_Params
+					log_change -Company_Acronym $Company_Acronym -ServiceTarget "sophos" -RMM_Device_ID $false -SC_Device_ID $false -Sophos_Device_ID $Device.id -ChangeType "sophos_tamper_disabled" -Hostname $Device.hostname -Reason "Sophos Tamper Protection is Disabled"
+	
+					if (($TamperProtectionDisabled | Measure-Object).count -ge 2 -and (log_time_diff($TamperProtectionDisabled)) -ge $OneWeek -and 
+						$Device.hostname -notin $Allow_Tamper_Protection_Disabled -and $Device.id -notin $Allow_Tamper_Protection_Disabled -and !$AllowTamperProtectionDisabled
+					) {
+						$MatchedDevice = $MatchedDevices | Where-Object { $_.sophos_matches -contains $Device.id }
+						$LastSeen = Get-Date $Device.lastSeenAt
+						
+						if ((($MatchedDevice.sc_matches | Measure-Object).count -ge 0 -or ($MatchedDevice.rmm_matches | Measure-Object).count -ge 0) -and $LastSeen -gt (Get-Date).AddDays(-3)) {
+							# Disabled for over 1 week, turn tamper protection back on (only if in rmm or sc and active in sophos, otherwise this device may have been decommissioned)
+							$PostBody = @{
+								enabled = $true
+								regeneratePassword = $false
+							}
+							$TamperProtectionResponse = Invoke-RestMethod -Method POST -Headers $SophosHeader -uri ($TenantApiHost + "/endpoint/v1/endpoints/$($Device.id)/tamper-protection") -Body ($PostBody | ConvertTo-Json) -ContentType "application/json"
+	
+							if ($TamperProtectionResponse.enabled -and !$TamperProtectionResponse.error) {
+								Write-Host "Re-enabled Sophos Tamper Protection on: $($Device.hostname)"
+							} else {
+								# Failed to re-enabled tamper protection, create a ticket
+							}
+						}
+					}
+				}
+			}
+
+			if ($SophosTamperKeys.Count -gt 0 -and $SophosFailedSleepTime -lt $MaxFailTime) {
+				@{
+					keys = $SophosTamperKeys
+					lastUpdated = (Get-Date)
+				} | ConvertTo-Json | Out-File -FilePath $SophosTamperKeysJsonPath
+				Write-Host "Exported Sophos Tamper Protection keys."
+			}
+			Write-Progress -Activity "Retrieving Sophos Tamper Protection Keys" -Status "Ready" -Completed
+		} elseif ($SophosTamperKeysJson -and $SophosTamperKeysJson.keys) {
+			$SophosTamperKeys = $SophosTamperKeysJson.keys;
+		}
+	}
+
 	# Get a count and full list of devices that have been used in the last $InactiveBillingDays for billing
 	if ($DOBillingExport) {
 		Write-Host "Building a device list for billing..."
