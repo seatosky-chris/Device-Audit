@@ -1299,20 +1299,33 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	if ($InstallQueue.PSObject.Properties) {
 		# Install RMM by SC
 		if ($InstallQueue.PSObject.Properties.Name -contains 'rmm' -and $InstallQueue.'rmm'.PSObject.Properties -and $InstallQueue.'rmm'.PSObject.Properties.Name -contains 'sc' -and $InstallQueue.'rmm'.'sc'.Count -gt 0) {
-			foreach ($DeviceID in $InstallQueue.'rmm'.'sc') {
+			foreach ($DeviceID in ($InstallQueue.'rmm'.'sc' | Sort-Object -Unique)) {
 				$SCDevice = $SC_DevicesHash[$DeviceID]
 
-				$LogParams = @{
-					ServiceTarget = "sc"
-					SC_Device_ID = $SCDevice.SessionID
+				$4HoursAgo = [int](New-TimeSpan -Start (Get-Date "01/01/1970") -End (Get-Date).AddHours(-4).ToUniversalTime()).TotalSeconds
+				$LogQuery_Params = @{
+					LogHistory = $LogHistory
+					StartTime = $4HoursAgo
+					EndTime = 'now'
+					ServiceTarget = 'sc'
 					ChangeType = "install_rmm"
+					SC_Device_ID = $SCDevice.SessionID
 					Hostname = $SCDevice.Name
 				}
-				$AttemptCount = log_attempt_count @LogParams -LogHistory $LogHistory
-				$EmailError = "Attempted reinstall of RMM on $($LogParams.Hostname). The Device Audit script has tried to reinstall RMM via SC $AttemptCount times now but it has not succeeded."
-				$LogParams.Reason = "RMM reinstall attempted."
+				$Install_Logs = log_query @LogQuery_Params
+				$LogCount = ($Install_Logs | Measure-Object).Count
 
-				if ($SCDevice -and $SCDevice.GuestLastSeen -gt (Get-Date).AddHours(-3)) {
+				if ($LogCount -eq 0 -and $SCDevice -and $SCDevice.GuestLastSeen -gt (Get-Date).AddMinutes(-30)) {
+					$LogParams = @{
+						ServiceTarget = "sc"
+						SC_Device_ID = $SCDevice.SessionID
+						ChangeType = "install_rmm"
+						Hostname = $SCDevice.Name
+					}
+					$AttemptCount = log_attempt_count @LogParams -LogHistory $LogHistory
+					$EmailError = "Attempted reinstall of RMM on $($LogParams.Hostname). The Device Audit script has tried to reinstall RMM via SC $AttemptCount times now but it has not succeeded."
+					$LogParams.Reason = "RMM reinstall attempted."
+
 					if ($SCDevice.GuestOperatingSystemName -like "*Windows*" -and $SCDevice.GuestOperatingSystemName -notlike "*Windows Embedded*") {
 						if (install_rmm_using_sc -SC_ID $SCDevice.SessionID -RMM_ORG_ID $RMM_ID -SCWebSession $SCWebSession) {
 							$AutoFix = $true
@@ -1332,11 +1345,24 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 		# Install SC by RMM
 		if ($InstallQueue.PSObject.Properties.Name -contains 'sc' -and $InstallQueue.'sc'.PSObject.Properties -and $InstallQueue.'sc'.PSObject.Properties.Name -contains 'rmm' -and $InstallQueue.'sc'.'rmm'.Count -gt 0) {
-			foreach ($DeviceID in $InstallQueue.'sc'.'rmm') {
+			foreach ($DeviceID in ($InstallQueue.'sc'.'rmm' | Sort-Object -Unique)) {
 				$RMMDevice = $RMM_DevicesHash[$DeviceID]
 
 				if ($RMMDevice.suspended -ne "True") {
-					if ($RMMDevice.Status -eq "Online" -or $RMMDevice."Last Seen" -eq "Currently Online" -or ($RMMDevice."Last Seen" -as [DateTime]) -gt (Get-Date).AddHours(-24)) {
+					$8HoursAgo = [int](New-TimeSpan -Start (Get-Date "01/01/1970") -End (Get-Date).AddHours(-8).ToUniversalTime()).TotalSeconds
+					$LogQuery_Params = @{
+						LogHistory = $LogHistory
+						StartTime = $8HoursAgo
+						EndTime = 'now'
+						ServiceTarget = 'rmm'
+						ChangeType = "install_sc"
+						RMM_Device_ID = $RMMDevice."Device UID"
+						Hostname = $RMMDevice."Device Hostname"
+					}
+					$Install_Logs = log_query @LogQuery_Params
+					$LogCount = ($Install_Logs | Measure-Object).Count
+					
+					if ($LogCount -eq 0 -and ($RMMDevice.Status -eq "Online" -or $RMMDevice."Last Seen" -eq "Currently Online" -or ($RMMDevice."Last Seen" -as [DateTime]) -gt (Get-Date).AddMinutes(-30))) {
 						if (install_sc_using_rmm -RMM_Device $RMMDevice) {
 							$LogParams = @{
 								ServiceTarget = "rmm"
