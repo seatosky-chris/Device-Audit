@@ -3588,7 +3588,7 @@ if ($DOUsageDBSave) {
 				$User = @{
 					id = $UserID
 					Username = $Username
-					DomainOrLocal = if ($Domain) { "Domain" } else { "Local" }
+					DomainOrLocal = if ($Domain -and $Domain -ne "WORKGROUP") { "Domain" } else { "Local" }
 					Domain = $Domain
 					ADUsername = $null
 					O365Email = $null
