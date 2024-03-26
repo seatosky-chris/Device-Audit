@@ -247,7 +247,7 @@ foreach ($Device in $Intune_Devices) {
 # Get all devices from JumpCloud
 $JC_Devices = @()
 if ($JCConnected) {
-	$JC_Devices = Get-JCSystem
+	$JC_Devices = Get-JCSystem | Where-Object { $_.desktopCapable }
 }
 $JC_DevicesHash = @{}
 foreach ($Device in $JC_Devices) { 
@@ -4140,6 +4140,8 @@ if ($DOBillingExport) {
 			$IntuneCompliance = $false
 			$IntuneDeviceOwnerType = $false
 			$IntuneIsEncrypted = $null
+			$JumpCloudDevice = @()
+			$JCLastContact = @()
 
 			if ($RMMDeviceID) {
 				$RMMDevice = $RMM_DevicesHash[$RMMDeviceID]
@@ -4216,19 +4218,6 @@ if ($DOBillingExport) {
 					$WarrantyStart = ($AutotaskDevice.userDefinedFields | Where-Object { $_.name -eq "Warranty Start Date" }).value
 				}
 			}
-			if ($JumpCloudDeviceID) {
-				$JumpCloudDevice = @()
-				foreach ($DeviceID in $Device.jc_matches) {
-					$JumpCloudDevice += $JC_DevicesHash[$DeviceID]
-				}
-				$JCLastContact = @()
-				$JumpCloudDevice.lastContact | ForEach-Object {
-					if ($_) {
-						$JCLastContact += [DateTime]$_
-					}
-				}
-				$JCLastContact = $JCLastContact | Sort-Object -Descending | Select-Object -First 1
-			}
 			if ($AzureDeviceID) {
 				$TrustTypes = @{
 					AzureAd = "Azure AD Joined"
@@ -4280,6 +4269,33 @@ if ($DOBillingExport) {
 				}
 				if (!$RAM) {
 					$RAM = [math]::Round($SCDevice.GuestSystemMemoryTotalMegabytes / 1024)
+				}
+			}
+			if ($JumpCloudDeviceID) {
+				foreach ($DeviceID in $Device.jc_matches) {
+					$JumpCloudDevice += $JC_DevicesHash[$DeviceID]
+				}
+				$JumpCloudDevice.lastContact | ForEach-Object {
+					if ($_) {
+						$JCLastContact += [DateTime]$_
+					}
+				}
+				$JCLastContact = $JCLastContact | Sort-Object -Descending | Select-Object -First 1
+
+				$JCDevice = $JC_DevicesHash[$JumpCloudDeviceID]
+				if ($JCDevice) {
+					if (!$Hostname) {
+						$Hostname = $JCDevice.displayName
+					}
+					if (!$SerialNumber) {
+						$SerialNumber = $JCDevice.serialNumber
+					}
+					if (!$OperatingSystem) {
+						$OperatingSystem = ($JCDevice.os + " " + $JCDevice.version)
+					}
+					if (!$DeviceType) {
+						$DeviceType = if ($JCDevice.version -like "*Server*") {"Server"} else {"Workstation"}
+					}
 				}
 			}
 			if ($SophosDeviceID) {

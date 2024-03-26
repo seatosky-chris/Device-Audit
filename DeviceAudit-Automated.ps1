@@ -1490,7 +1490,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	$JC_Devices = @()
 	if ($JCConnected) {
 		Write-Host "Getting JC System"
-		$JC_Devices = Get-JCSystem
+		$JC_Devices = Get-JCSystem | Where-Object { $_.desktopCapable }
 	}
 	$JC_DevicesHash = @{}
 	foreach ($Device in $JC_Devices) { 
@@ -5270,6 +5270,9 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				$IntuneDeviceOwnerType = $false
 				$IntuneIsEncrypted = $null
 				$RMMAntivirus = $false
+				$JumpCloudDevice = @()
+				$JCLastContact = @()
+				$JCUser = @()
 
 				if ($RMMDeviceID) {
 					$RMMDevice = $RMM_DevicesHash[$RMMDeviceID]
@@ -5346,25 +5349,6 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						$WarrantyStart = ($AutotaskDevice.userDefinedFields | Where-Object { $_.name -eq "Warranty Start Date" }).value
 					}
 				}
-				if ($JumpCloudDeviceID) {
-					$JumpCloudDevice = @()
-					foreach ($DeviceID in $Device.jc_matches) {
-						$JumpCloudDevice += $JC_DevicesHash[$DeviceID]
-					}
-					$JCLastContact = @()
-					$JumpCloudDevice.lastContact | ForEach-Object {
-						if ($_) {
-							$JCLastContact += [DateTime]$_
-						}
-					}
-					$JCLastContact = $JCLastContact | Sort-Object -Descending | Select-Object -First 1
-					$JCUser = @()
-					if ($JC_Users) {
-						foreach ($JCDevice in $JumpCloudDevice) {
-							$JCUser += $JC_Users | Where-Object { $_.SystemID -eq $JCDevice.id }
-						}
-					}
-				}
 				if ($AzureDeviceID) {
 					$TrustTypes = @{
 						AzureAd = "Azure AD Joined"
@@ -5416,6 +5400,38 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					}
 					if (!$RAM) {
 						$RAM = [math]::Round($SCDevice.GuestSystemMemoryTotalMegabytes / 1024)
+					}
+				}
+				if ($JumpCloudDeviceID) {
+					foreach ($DeviceID in $Device.jc_matches) {
+						$JumpCloudDevice += $JC_DevicesHash[$DeviceID]
+					}
+					$JumpCloudDevice.lastContact | ForEach-Object {
+						if ($_) {
+							$JCLastContact += [DateTime]$_
+						}
+					}
+					$JCLastContact = $JCLastContact | Sort-Object -Descending | Select-Object -First 1
+					if ($JC_Users) {
+						foreach ($JCDevice in $JumpCloudDevice) {
+							$JCUser += $JC_Users | Where-Object { $_.SystemID -eq $JCDevice.id }
+						}
+					}
+
+					$JCDevice = $JC_DevicesHash[$JumpCloudDeviceID]
+					if ($JCDevice) {
+						if (!$Hostname) {
+							$Hostname = $JCDevice.displayName
+						}
+						if (!$SerialNumber) {
+							$SerialNumber = $JCDevice.serialNumber
+						}
+						if (!$DeviceType) {
+							$DeviceType = if ($JCDevice.version -like "*Server*") {"Server"} else {"Workstation"}
+						}
+						if (!$OperatingSystem) {
+							$OperatingSystem = ($JCDevice.os + " " + $JCDevice.version)
+						}
 					}
 				}
 				if ($SophosDeviceID) {
