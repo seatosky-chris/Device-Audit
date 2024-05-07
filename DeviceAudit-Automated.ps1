@@ -900,7 +900,15 @@ if ($true) {
 			$InstallQueue.($ToInstall) | Add-Member -NotePropertyName $FromDeviceType -NotePropertyValue @()
 		}
 
-		$InstallQueue.($ToInstall).($FromDeviceType) += if ($FromDeviceType -eq "sc") { $SC_ID } else { $RMM_ID }
+		if ($FromDeviceType -eq "sc") {
+			if ($SC_ID -notin $InstallQueue.($ToInstall).($FromDeviceType)) {
+				$InstallQueue.($ToInstall).($FromDeviceType) += $SC_ID
+			}
+		} else {
+			if ($RMM_ID -notin $InstallQueue.($ToInstall).($FromDeviceType)) {
+				$InstallQueue.($ToInstall).($FromDeviceType) += $RMM_ID
+			}
+		}
 
 		if ($InstallQueue -and $InstallQueuePath) {
 			$InstallQueue | ConvertTo-Json -Depth 5 | Out-File -FilePath $InstallQueuePath
