@@ -452,6 +452,13 @@ if ($true) {
 		return $History_Filtered;
 	}
 
+	# This function finds the difference in seconds between the oldest and newest unixtimestamp in a set of log history
+	function log_time_diff($LogHistory) {
+		$Newest = $LogHistory | Sort-Object -Property datetime -Descending | Select-Object -First 1
+		$Oldest = $LogHistory | Sort-Object -Property datetime | Select-Object -First 1
+		return $Newest.datetime - $Oldest.datetime
+	}
+
 	# Functions for comparing devices by their last active date
 	# Pass the function a list of device ids
 	# Each returns an ordered list with the type (rmm, sc, or sophos), device ID and last active date, ordered with newest first, $null if no date
