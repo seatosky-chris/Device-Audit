@@ -2197,6 +2197,11 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	$LogFilePath = "$($LogLocation)\$($Company_Acronym)_log.json"
 	if ($LogLocation -and (Test-Path -Path $LogFilePath)) {
 		$LogHistory = Get-Content -Path $LogFilePath -Raw | ConvertFrom-Json
+		
+		# Cleanup log history (remove everything older than 6 months)
+		$SixMonthsAgo = [int](New-TimeSpan -Start (Get-Date "01/01/1970") -End ((Get-Date).AddMonths(-6)).ToUniversalTime()).TotalSeconds
+		$LogHistory = $LogHistory | Where-Object { $_.datetime -ge $SixMonthsAgo }
+		$LogHistory | ConvertTo-Json -Depth 5 | Out-File -FilePath $LogFilePath
 	} else {
 		$LogHistory = @{}
 	}
