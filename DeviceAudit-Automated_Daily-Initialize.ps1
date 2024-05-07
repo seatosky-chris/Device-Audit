@@ -47,6 +47,24 @@ If (Get-Module -ListAvailable -Name "JumpCloud") {Import-module JumpCloud -Force
 
 # Connect to Azure
 if (Test-Path "$PSScriptRoot\Config Files\AzureServiceAccount.json") {
+	$LastUpdatedAzureCreds = (Get-Item "$PSScriptRoot\Config Files\AzureServiceAccount.json").LastWriteTime
+	if ($LastUpdatedAzureCreds -lt (Get-Date).AddMonths(-3)) {
+		Write-PSFMessage -Level Error -Message "Azure credentials are out of date. Please run Connect-AzAccount to set up your Azure credentials."
+		# Send an email alert
+		$mailbody = @{
+			"From" = $EmailFrom
+			"To" = $EmailTo_FailedFixes
+			"Subject" = "Device Audit - Azure Credentials need updating"
+			"TextContent" = "The Azure credentials are out of date on $env:computername. Please run Connect-AzAccount to set up your Azure credentials."
+		} | ConvertTo-Json -Depth 6
+
+		$headers = @{
+			'x-api-key' = $Email_APIKey.Key
+		}
+		Invoke-RestMethod -Method Post -Uri $Email_APIKey.Url -Body $mailbody -Headers $headers -ContentType application/json
+		exit
+	}
+
 	try {
 		Import-AzContext -Path "$PSScriptRoot\Config Files\AzureServiceAccount.json"
 	} catch {

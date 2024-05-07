@@ -35,7 +35,13 @@ If (Get-Module -ListAvailable -Name "Subnet") {Import-module Subnet -Force} Else
 
 # Connect to Azure
 if (Test-Path "$PSScriptRoot\Config Files\AzureServiceAccount.json") {
-	Import-AzContext -Path "$PSScriptRoot\Config Files\AzureServiceAccount.json"
+	$LastUpdatedAzureCreds = (Get-Item "$PSScriptRoot\Config Files\AzureServiceAccount.json").LastWriteTime
+	if ($LastUpdatedAzureCreds -lt (Get-Date).AddMonths(-3)) {
+		Connect-AzAccount
+		Save-AzContext -Path "$PSScriptRoot\Config Files\AzureServiceAccount.json"
+	} else {
+		Import-AzContext -Path "$PSScriptRoot\Config Files\AzureServiceAccount.json"
+	}
 } else {
 	Connect-AzAccount
 	Save-AzContext -Path "$PSScriptRoot\Config Files\AzureServiceAccount.json"

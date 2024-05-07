@@ -84,6 +84,12 @@ If (Get-Module -ListAvailable -Name "Subnet") {Import-module Subnet -Force} Else
 
 # Connect to Azure
 if (Test-Path "$PSScriptRoot\Config Files\AzureServiceAccount.json") {
+	$LastUpdatedAzureCreds = (Get-Item "$PSScriptRoot\Config Files\AzureServiceAccount.json").LastWriteTime
+	if ($LastUpdatedAzureCreds -lt (Get-Date).AddMonths(-3)) {
+		Write-PSFMessage -Level Error -Message "Azure credentials are out of date. Please run Connect-AzAccount to set up your Azure credentials."
+		exit
+	}
+
 	try {
 		Import-AzContext -Path "$PSScriptRoot\Config Files\AzureServiceAccount.json"
 	} catch {
