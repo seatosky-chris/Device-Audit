@@ -1159,7 +1159,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			-Method POST `
 			-Body $AuthBody
 
-		$AzureToken = $conn.access_token
+		$AzureToken = ConvertTo-SecureString -String $conn.access_token -AsPlainText -Force
 		$MgGraphConnect = Connect-MgGraph -AccessToken $AzureToken
 		if ($MgGraphConnect -eq "Welcome To Microsoft Graph!") {
 			$AzureConnected = $true
