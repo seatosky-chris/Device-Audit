@@ -1403,7 +1403,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	$JC_Devices = @()
 	if ($JCConnected) {
 		Write-Host "Getting JC System"
-		$JC_Devices = Get-JCSystem
+		$JC_Devices = Get-JCSystem | Where-Object { $_.desktopCapable }
 	}
 	$JC_DevicesHash = @{}
 	foreach ($Device in $JC_Devices) { 
