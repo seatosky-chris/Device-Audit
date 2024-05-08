@@ -1223,6 +1223,21 @@ if ($true) {
 		}
 	}
 
+	function is_sc_installed($RMM_Device) {
+		$DeviceSoftware = Get-DrmmAuditDeviceSoftware -DeviceUid $RMM_Device."Device UID"
+		if (($DeviceSoftware | Where-Object { $_.name -like "ScreenConnect Client*" } | Measure-Object).Count -gt 0) {
+			return $true
+		} else {
+			return $false
+		}
+	}
+
+	function uninstall_sc_using_rmm($RMM_Device) {
+		if ($RMM_Device."Operating System" -like "*Windows*" -and (is_sc_installed -RMM_Device $RMM_Device)) {
+			Set-DrmmDeviceQuickJob -DeviceUid $RMM_Device."Device UID" -jobName "Uninstall ScreenConnect on $($RMM_Device."Device Hostname")" -ComponentName "ConnectWise Control (ScreenConnect) Uninstaller [WIN]"
+		}
+	}
+
 	function install_sc_using_rmm($RMM_Device) {
 		if ($RMM_Device."Operating System" -like "*Windows*") {
 			Set-DrmmDeviceQuickJob -DeviceUid $RMM_Device."Device UID" -jobName "Install ScreenConnect on $($RMM_Device."Device Hostname")" -ComponentName "ScreenConnect Install - WIN"
@@ -3222,13 +3237,18 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 							foreach ($RMMDevice in $RMM_Device) {
 								if ($RMMDevice.suspended -ne "True") {
 									if ($RMMDevice.Status -eq "Online" -or $RMMDevice."Last Seen" -eq "Currently Online" -or ($RMMDevice."Last Seen" -as [DateTime]) -gt (Get-Date).AddHours(-24)) {
+										$LogParams = @{
+											ServiceTarget = "rmm"
+											RMM_Device_ID = $RMMDevice."Device UID"
+											ChangeType = "install_sc"
+											Hostname = $RMMDevice."Device Hostname"
+										}
+										$AttemptCount = log_attempt_count @LogParams -LogHistory $LogHistory
+
+										if ($AttemptCount -gt 3) {
+											uninstall_sc_using_rmm -RMM_Device $RMMDevice
+										}
 										if (install_sc_using_rmm -RMM_Device $RMMDevice) {
-											$LogParams = @{
-												ServiceTarget = "rmm"
-												RMM_Device_ID = $RMMDevice."Device UID"
-												ChangeType = "install_sc"
-												Hostname = $RMMDevice."Device Hostname"
-											}
 											$AttemptCount = log_attempt_count @LogParams -LogHistory $LogHistory
 											$EmailError = "ScreenConnect is broken on $($LogParams.Hostname). The Device Audit script has tried to reinstall SC via RMM $AttemptCount times now but it has not succeeded."
 											$LogParams.SC_Device_ID = $Device.sc_matches
@@ -3469,13 +3489,18 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						foreach ($RMMDevice in $RMMDevices) {
 							if ($RMMDevice.suspended -ne "True") {
 								if ($RMMDevice.Status -eq "Online" -or $RMMDevice."Last Seen" -eq "Currently Online" -or ($RMMDevice."Last Seen" -as [DateTime]) -gt (Get-Date).AddHours(-24)) {
+									$LogParams = @{
+										ServiceTarget = "rmm"
+										RMM_Device_ID = $RMMDevice."Device UID"
+										ChangeType = "install_sc"
+										Hostname = $RMMDevice."Device Hostname"
+									}
+									$AttemptCount = log_attempt_count @LogParams -LogHistory $LogHistory
+
+									if ($AttemptCount -gt 3) {
+										uninstall_sc_using_rmm -RMM_Device $RMMDevice
+									}
 									if (install_sc_using_rmm -RMM_Device $RMMDevice) {
-										$LogParams = @{
-											ServiceTarget = "rmm"
-											RMM_Device_ID = $RMMDevice."Device UID"
-											ChangeType = "install_sc"
-											Hostname = $RMMDevice."Device Hostname"
-										}
 										$AttemptCount = log_attempt_count @LogParams -LogHistory $LogHistory
 										$EmailError = "ScreenConnect is not installed on $($LogParams.Hostname). The Device Audit script has tried to install SC via RMM $AttemptCount times now but it has not succeeded."
 										$LogParams.SC_Device_ID = $SCDeviceIDs

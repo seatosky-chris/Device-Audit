@@ -1043,6 +1043,21 @@ if ($true) {
 		}
 	}
 
+	function is_sc_installed($RMM_Device) {
+		$DeviceSoftware = Get-DrmmAuditDeviceSoftware -DeviceUid $RMM_Device."Device UID"
+		if (($DeviceSoftware | Where-Object { $_.name -like "ScreenConnect Client*" } | Measure-Object).Count -gt 0) {
+			return $true
+		} else {
+			return $false
+		}
+	}
+
+	function uninstall_sc_using_rmm($RMM_Device) {
+		if ($RMM_Device."Operating System" -like "*Windows*" -and (is_sc_installed -RMM_Device $RMM_Device)) {
+			Set-DrmmDeviceQuickJob -DeviceUid $RMM_Device."Device UID" -jobName "Uninstall ScreenConnect on $($RMM_Device."Device Hostname")" -ComponentName "ConnectWise Control (ScreenConnect) Uninstaller [WIN]"
+		}
+	}
+
 	function install_sc_using_rmm($RMM_Device) {
 		if ($RMM_Device."Operating System" -like "*Windows*") {
 			Set-DrmmDeviceQuickJob -DeviceUid $RMM_Device."Device UID" -jobName "Install ScreenConnect on $($RMM_Device."Device Hostname")" -ComponentName "ScreenConnect Install - WIN"
@@ -1371,13 +1386,18 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					$LogCount = ($Install_Logs | Measure-Object).Count
 					
 					if ($LogCount -eq 0 -and ($RMMDevice.Status -eq "Online" -or $RMMDevice."Last Seen" -eq "Currently Online" -or ($RMMDevice."Last Seen" -as [DateTime]) -gt (Get-Date).AddMinutes(-30))) {
+						$LogParams = @{
+							ServiceTarget = "rmm"
+							RMM_Device_ID = $RMMDevice."Device UID"
+							ChangeType = "install_sc"
+							Hostname = $RMMDevice."Device Hostname"
+						}
+						$AttemptCount = log_attempt_count @LogParams -LogHistory $LogHistory
+
+						if ($AttemptCount -gt 3) {
+							uninstall_sc_using_rmm -RMM_Device $RMMDevice
+						}
 						if (install_sc_using_rmm -RMM_Device $RMMDevice) {
-							$LogParams = @{
-								ServiceTarget = "rmm"
-								RMM_Device_ID = $RMMDevice."Device UID"
-								ChangeType = "install_sc"
-								Hostname = $RMMDevice."Device Hostname"
-							}
 							$AttemptCount = log_attempt_count @LogParams -LogHistory $LogHistory
 							$EmailError = "Attempted reinstall of SC on $($LogParams.Hostname). The Device Audit script has tried to reinstall SC via RMM $AttemptCount times now but it has not succeeded."
 							$LogParams.Reason = "SC reinstall attempted."
