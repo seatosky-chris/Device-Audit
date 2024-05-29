@@ -1583,6 +1583,12 @@ if ($LogLocation -and (Test-Path -Path $LogFilePath)) {
 	$LogHistory = @{}
 }
 
+# Prepare recent RMM jobs log
+if (!(Test-Path -Path $RecentRMMJobsLocation)) {
+	New-Item -ItemType Directory -Force -Path $RecentRMMJobsLocation | Out-Null
+}
+$RecentRMMJobsPath = "$($RecentRMMJobsLocation)\$($Company_Acronym)_recent_rmm_jobs.json"
+
 # Function for logging automated changes (installs, deletions, etc.)
 # $ServiceTarget is 'rmm', 'sc', 'sophos', 'jc', 'itg', or 'autotask'
 function log_change($Company_Acronym, $ServiceTarget, $RMM_Device_ID, $SC_Device_ID, $Sophos_Device_ID, $JC_Device_ID = $false, $ChangeType, $Hostname = "", $Reason = "") {
@@ -2568,13 +2574,45 @@ function install_rmm_using_sc_mac($SC_ID, $RMM_ORG_ID, $SCWebSession) {
 	}
 }
 
+function log_recent_rmm_job($RMM_Device, $JobType, $JobID) {
+	$RecentRMMJobs = [PSCustomObject]@{}
+
+	if (Test-Path $RecentRMMJobsPath) {
+		$RecentRMMJobs = Get-Content -Path $RecentRMMJobsPath -Raw | ConvertFrom-Json
+		if (!$RecentRMMJobs) {
+			$RecentRMMJobs = [PSCustomObject]@{}
+		}
+	}
+	
+	if (!$RecentRMMJobs.PSObject.Properties -or $RecentRMMJobs.PSObject.Properties.Name -notcontains $RMM_Device."Device UID") {
+		$RecentRMMJobs | Add-Member -NotePropertyName $RMM_Device."Device UID" -NotePropertyValue $false
+		$RecentRMMJobs.($RMM_Device."Device UID") = [PSCustomObject]@{}
+	}
+
+	if (!$RecentRMMJobs.($RMM_Device."Device UID").PSObject.Properties -or $RecentRMMJobs.($RMM_Device."Device UID").PSObject.Properties.Name -notcontains $JobType) {
+		$RecentRMMJobs.($RMM_Device."Device UID") | Add-Member -NotePropertyName $JobType -NotePropertyValue $false	
+	}
+
+	$RecentRMMJobs.($RMM_Device."Device UID").($JobType) = $JobID
+
+	if ($RecentRMMJobs -and $RecentRMMJobsPath) {
+		$RecentRMMJobs | ConvertTo-Json -Depth 5 | Out-File -FilePath $RecentRMMJobsPath
+	}
+}
+
 function install_sc_using_rmm($RMM_Device) {
 	if ($RMM_Device."Operating System" -like "*Windows*") {
-		Set-DrmmDeviceQuickJob -DeviceUid $RMM_Device."Device UID" -jobName "Install ScreenConnect on $($RMM_Device."Device Hostname")" -ComponentName "ScreenConnect Install - WIN"
-		return $true
+		$Job = Set-DrmmDeviceQuickJob -DeviceUid $RMM_Device."Device UID" -jobName "Install ScreenConnect on $($RMM_Device."Device Hostname")" -ComponentName "ScreenConnect Install - WIN"
+		if ($Job -and $Job.job -and $Job.job.uid) {
+			log_recent_rmm_job -RMM_Device $RMM_Device -JobType "install_sc" -JobID $Job.job.uid
+			return $true
+		}
 	} elseif ($RMM_Device."Operating System" -like "*Mac OS*") {
-		Set-DrmmDeviceQuickJob -DeviceUid $RMM_Device."Device UID" -jobName "Install ScreenConnect on $($RMM_Device."Device Hostname")" -ComponentName "ScreenConnect Install - MAC"
-		return $true
+		$Job = Set-DrmmDeviceQuickJob -DeviceUid $RMM_Device."Device UID" -jobName "Install ScreenConnect on $($RMM_Device."Device Hostname")" -ComponentName "ScreenConnect Install - MAC"
+		if ($Job -and $Job.job -and $Job.job.uid) {
+			log_recent_rmm_job -RMM_Device $RMM_Device -JobType "install_sc" -JobID $Job.job.uid
+			return $true
+		}
 	}
 	return $false
 }

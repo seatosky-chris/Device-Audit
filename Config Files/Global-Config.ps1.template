@@ -244,6 +244,15 @@ $RMMDeviceDetailsLocation = "C:\Users\Administrator\Documents\RMMDeviceDetails"
 $InstallQueueLocation = "C:\Users\Administrator\Documents\InstallQueue"
 
 ####################
+# $RecentRMMJobsLocation
+#
+# The location to store a list of recent jobs that were ran in RMM (stores the ID of the most recently created job)
+#
+# Example: $RecentRMMJobsLocation = "C:\Users\Administrator\Documents\RecentRMMJobs"
+#
+$RecentRMMJobsLocation = "C:\Users\Administrator\Documents\RecentRMMJobs"
+
+####################
 # $HistoryLocation
 #
 # The location to store history files of the device audit (can be used by other scripts to get usage stats, who uses which computer, etc.)

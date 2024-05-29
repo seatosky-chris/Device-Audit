@@ -831,7 +831,7 @@ if ($true) {
 		if ($AntiForgeryToken) {
 			$FormBody = '[["All Machines"],[{"SessionID": "' + $SC_ID + '","EventType":21,"Data":null}]]'
 			$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/PageService.ashx/AddSessionEvents" -WebSession $SCWebSession -Headers @{"X-Anti-Forgery-Token" = $AntiForgeryToken} -Body $FormBody -Method 'POST' -ContentType 'application/json'
-			remove_device_from_install_queue -SC_ID $SC_ID -ToInstall $false
+			$Removed = remove_device_from_install_queue -SC_ID $SC_ID -ToInstall $false
 			return $true
 		} else {
 			Write-Warning "Could not get an anti-forgery token from Screenconnect. Failed to delete device from SC: $SC_ID"
@@ -842,7 +842,7 @@ if ($true) {
 	# This doesn't truly delete a device from RMM (we can't using the API), instead it sets the Delete Me UDF which adds the device into the device filter of devices we should delete
 	function delete_from_rmm($RMM_Device_ID) {
 		Set-DrmmDeviceUdf -deviceUid $RMM_Device_ID -udf30 "True"
-		remove_device_from_install_queue -RMM_ID $RMM_Device_ID -ToInstall $false
+		$Removed = remove_device_from_install_queue -RMM_ID $RMM_Device_ID -ToInstall $false
 	}
 
 	# Deletes a device from Sophos (be careful with this, make sure it no longer is installed on the device!)
@@ -855,7 +855,7 @@ if ($true) {
 					return $true
 				}
 			} catch {
-				Write-Error "Could not auto-delete Sophos device '$Sophos_Device_ID' for the reason: " + $_.Exception.Message
+				Write-PSFMessage -Level Error -Message "Could not auto-delete Sophos device '$Sophos_Device_ID' for the reason: " + $_.Exception.Message
 			}
 		}
 		return $false
@@ -889,7 +889,7 @@ if ($true) {
 			Set-ITGlueConfigurations -id $ITG_Device_ID -data $UpdatedConfig
 			return $true
 		} catch {
-			Write-Error "Could not archive ITG configuration '$ITG_Device_ID' for the reason: " + $_.Exception.Message
+			Write-PSFMessage -Level Error -Message "Could not archive ITG configuration '$ITG_Device_ID' for the reason: " + $_.Exception.Message
 			return $false
 		}
 	}
@@ -1015,7 +1015,7 @@ if ($true) {
 
 			$FormBody = '[["All Machines"],[{"SessionID": "' + $SC_ID + '","EventType":44,"Data":"' + $RMMInstallCmd + '"}]]'
 			$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/PageService.ashx/AddSessionEvents" -WebSession $SCWebSession -Headers @{"X-Anti-Forgery-Token" = $AntiForgeryToken} -Body $FormBody -Method 'POST' -ContentType 'application/json'
-			remove_device_from_install_queue -SC_ID $SC_ID -ToInstall "rmm"
+			$Removed = remove_device_from_install_queue -SC_ID $SC_ID -ToInstall "rmm"
 			return $true
 		} else {
 			Write-Warning "Could not get an anti-forgery token from Screenconnect. Failed to install RMM for SC device ID: $SC_ID"
@@ -1034,7 +1034,7 @@ if ($true) {
 	
 			$FormBody = '[["All Machines"],[{"SessionID": "' + $SC_ID + '","EventType":44,"Data":"' + $RMMInstallCmd + '"}]]'
 			$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/PageService.ashx/AddSessionEvents" -WebSession $SCWebSession -Headers @{"X-Anti-Forgery-Token" = $AntiForgeryToken} -Body $FormBody -Method 'POST' -ContentType 'application/json'
-			remove_device_from_install_queue -SC_ID $SC_ID -ToInstall "rmm"
+			$Removed = remove_device_from_install_queue -SC_ID $SC_ID -ToInstall "rmm"
 	
 			return $true
 		} else {
@@ -1052,21 +1052,83 @@ if ($true) {
 		}
 	}
 
-	function uninstall_sc_using_rmm($RMM_Device) {
-		if ($RMM_Device."Operating System" -like "*Windows*" -and (is_sc_installed -RMM_Device $RMM_Device)) {
-			Set-DrmmDeviceQuickJob -DeviceUid $RMM_Device."Device UID" -jobName "Uninstall ScreenConnect on $($RMM_Device."Device Hostname")" -ComponentName "ConnectWise Control (ScreenConnect) Uninstaller [WIN]"
+	function log_recent_rmm_job($RMM_Device, $JobType, $JobID) {
+		$RecentRMMJobs = [PSCustomObject]@{}
+
+		if (Test-Path $RecentRMMJobsPath) {
+			$RecentRMMJobs = Get-Content -Path $RecentRMMJobsPath -Raw | ConvertFrom-Json
+			if (!$RecentRMMJobs) {
+				$RecentRMMJobs = [PSCustomObject]@{}
+			}
+		}
+		
+		if (!$RecentRMMJobs.PSObject.Properties -or $RecentRMMJobs.PSObject.Properties.Name -notcontains $RMM_Device."Device UID") {
+			$RecentRMMJobs | Add-Member -NotePropertyName $RMM_Device."Device UID" -NotePropertyValue $false
+			$RecentRMMJobs.($RMM_Device."Device UID") = [PSCustomObject]@{}
+		}
+
+		if (!$RecentRMMJobs.($RMM_Device."Device UID").PSObject.Properties -or $RecentRMMJobs.($RMM_Device."Device UID").PSObject.Properties.Name -notcontains $JobType) {
+			$RecentRMMJobs.($RMM_Device."Device UID") | Add-Member -NotePropertyName $JobType -NotePropertyValue $false	
+		}
+
+		$RecentRMMJobs.($RMM_Device."Device UID").($JobType) = $JobID
+
+		if ($RecentRMMJobs -and $RecentRMMJobsPath) {
+			$RecentRMMJobs | ConvertTo-Json -Depth 5 | Out-File -FilePath $RecentRMMJobsPath
 		}
 	}
 
+	function is_existing_rmm_job_active($RMM_Device, $JobType) {
+		$RecentRMMJobs = $false
+		if (Test-Path -Path $RecentRMMJobsPath) {
+			$RecentRMMJobs = Get-Content -Path $RecentRMMJobsPath -Raw | ConvertFrom-Json
+		}
+
+		if ($RecentRMMJobs -and $RecentRMMJobs.($RMM_Device."Device UID") -and $RecentRMMJobs.($RMM_Device."Device UID").($JobType)) {
+			$JobID = $RecentRMMJobs.($RMM_Device."Device UID").($JobType)
+			$JobStatus = Get-DrmmJobStatus -jobUid $JobID
+
+			if ($JobStatus -and $JobStatus.status -and $JobStatus.status -eq "active") {
+				return $true
+			}
+		}
+
+		return $false
+	}
+
+	function uninstall_sc_using_rmm($RMM_Device) {
+		if ($RMM_Device."Operating System" -like "*Windows*" -and (is_sc_installed -RMM_Device $RMM_Device)) {
+			if (is_existing_rmm_job_active -RMM_Device $RMM_Device -JobType "uninstall_sc") {
+				return $false
+			}
+			$Job = Set-DrmmDeviceQuickJob -DeviceUid $RMM_Device."Device UID" -jobName "Uninstall ScreenConnect on $($RMM_Device."Device Hostname")" -ComponentName "ConnectWise Control (ScreenConnect) Uninstaller [WIN]"
+			if ($Job -and $Job.job -and $Job.job.uid) {
+				log_recent_rmm_job -RMM_Device $RMM_Device -JobType "uninstall_sc" -JobID $Job.job.uid
+				return $true
+			}
+		}
+		return $false
+	}
+
 	function install_sc_using_rmm($RMM_Device) {
+		if (is_existing_rmm_job_active -RMM_Device $RMM_Device -JobType "install_sc") {
+			return $false
+		}
+
 		if ($RMM_Device."Operating System" -like "*Windows*") {
-			Set-DrmmDeviceQuickJob -DeviceUid $RMM_Device."Device UID" -jobName "Install ScreenConnect on $($RMM_Device."Device Hostname")" -ComponentName "ScreenConnect Install - WIN"
-			remove_device_from_install_queue -RMM_ID $RMM_Device."Device UID" -ToInstall "sc"
-			return $true
+			$Job = Set-DrmmDeviceQuickJob -DeviceUid $RMM_Device."Device UID" -jobName "Install ScreenConnect on $($RMM_Device."Device Hostname")" -ComponentName "ScreenConnect Install - WIN"
+			if ($Job -and $Job.job -and $Job.job.uid) {
+				$Removed = remove_device_from_install_queue -RMM_ID $RMM_Device."Device UID" -ToInstall "sc"
+				log_recent_rmm_job -RMM_Device $RMM_Device -JobType "install_sc" -JobID $Job.job.uid
+				return $true
+			}
 		} elseif ($RMM_Device."Operating System" -like "*Mac OS*") {
-			Set-DrmmDeviceQuickJob -DeviceUid $RMM_Device."Device UID" -jobName "Install ScreenConnect on $($RMM_Device."Device Hostname")" -ComponentName "ScreenConnect Install - MAC"
-			remove_device_from_install_queue -RMM_ID $RMM_Device."Device UID" -ToInstall "sc"
-			return $true
+			$Job = Set-DrmmDeviceQuickJob -DeviceUid $RMM_Device."Device UID" -jobName "Install ScreenConnect on $($RMM_Device."Device Hostname")" -ComponentName "ScreenConnect Install - MAC"
+			if ($Job -and $Job.job -and $Job.job.uid) {
+				$Removed = remove_device_from_install_queue -RMM_ID $RMM_Device."Device UID" -ToInstall "sc"
+				log_recent_rmm_job -RMM_Device $RMM_Device -JobType "install_sc" -JobID $Job.job.uid
+				return $true
+			}
 		}
 		return $false
 	}
@@ -1108,6 +1170,13 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	if (!$HasInstalls) {
 		continue
 	}
+
+	# Get recent RMM jobs log
+	if (!(Test-Path -Path $RecentRMMJobsLocation)) {
+		New-Item -ItemType Directory -Force -Path $RecentRMMJobsLocation | Out-Null
+	}
+	$RecentRMMJobsPath = "$($RecentRMMJobsLocation)\$($Company_Acronym)_recent_rmm_jobs.json"
+	
 
 	# Get RMM devices
 	$attempts = 0
