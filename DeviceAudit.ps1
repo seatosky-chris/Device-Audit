@@ -129,6 +129,11 @@ if ($ITGAPIKey.Key) {
 	$LANFilterID = (Get-ITGlueFlexibleAssetTypes -filter_name $LANFlexAssetName).data
 	$OverviewFilterID = (Get-ITGlueFlexibleAssetTypes -filter_name $OverviewFlexAssetName).data
 	$ITGConnected = $true
+
+	if (!$WANFilterID -or !$LANFilterID -or !$OverviewFilterID) {
+		Write-Error "Could not get all of the flex asset filter id's from ITG. Exiting..."
+		exit 1
+	}
 }
 
 # Connect to Autotask
@@ -204,11 +209,26 @@ if ($ITGConnected -and $ITG_ID) {
 	while ($ITG_Devices.links.next) {
 		$i++
 		$Configurations_Next = Get-ITGlueConfigurations -page_size "1000" -page_number $i -organization_id $ITG_ID
+		if (!$Configurations_Next -or $Configurations_Next.Error) {
+			# We got an error querying configurations, wait and try again
+			Start-Sleep -Seconds 2
+			$Configurations_Next = Get-ITGlueConfigurations -page_size "1000" -page_number $i -organization_id $ITG_ID
+	
+			if (!$Configurations_Next -or $Configurations_Next.Error) {
+				Write-Error "An error occurred trying to get the existing configurations from ITG. Exiting..."
+				Write-Error $Configurations_Next.Error
+				exit 1
+			}
+		}
 		$ITG_Devices.data += $Configurations_Next.data
 		$ITG_Devices.links = $Configurations_Next.links
 	}
 	if ($ITG_Devices -and $ITG_Devices.data) {
 		$ITG_Devices = $ITG_Devices.data
+	}
+	if (!$ITG_Devices) {
+		Write-Warning "There was an issue getting the Configurations from ITG. Exiting..."
+		exit 1
 	}
 }
 $ITG_DevicesHash = @{}
@@ -4105,8 +4125,8 @@ if ($Sophos_Company -and $Sophos_Devices -and $SophosTenantID -and $TenantApiHos
 					# 		queueID = 29682833
 					# 		issueType = 33
 					# 		subIssueType = 231
-					# 		seviceLevelAgreementID = 5
-					# 		contractID = if ($Autotask_Contract) { $Autotask_Contract } else { $null }
+					# 		serviceLevelAgreementID = 5
+					# 		contractID = if ($Autotask_Contract) { $Autotask_Contract.id } else { $null }
 					# 		title = "Sophos Tamper Protection Disabled on: " + $Device.hostname
 					# 		description = "Sophos tamper protection has been turned off on ${$Device.hostname} for at least 1 week. Please fix this issue."
 					# 	}
@@ -4816,10 +4836,35 @@ if ($DOUpdateDeviceLocations -and $ITGConnected -and $ITG_ID) {
 	$WANs = Get-ITGlueFlexibleAssets -page_size 1000 -filter_flexible_asset_type_id $WANFilterID.id -filter_organization_id $ITG_ID
 	$LANs = Get-ITGlueFlexibleAssets -page_size 1000 -filter_flexible_asset_type_id $LANFilterID.id -filter_organization_id $ITG_ID
 	$ITGLocations = Get-ITGlueLocations -org_id $ITG_ID
+
+	if (!$WANs -or $WANs.Error) {
+		Write-Error "An error occurred trying to get the existing WAN assets from ITG. Exiting..."
+		Write-Error $WANs.Error
+		exit 1
+	}
+	if (!$LANs -or $LANs.Error) {
+		Write-Error "An error occurred trying to get the existing LAN assets from ITG. Exiting..."
+		Write-Error $LANs.Error
+		exit 1
+	}
+	if (!$ITGLocations -or $ITGLocations.Error) {
+		Write-Error "An error occurred trying to get the existing location assets from ITG. Exiting..."
+		Write-Error $ITGLocations.Error
+		exit 1
+	}
+
 	$ITGLocations = $ITGLocations.data
+
+
 	
 	if ($OverviewFilterID) {
 		$CustomOverviews = Get-ITGlueFlexibleAssets -filter_flexible_asset_type_id $OverviewFilterID.id -filter_organization_id $ITG_ID
+		if (!$CustomOverviews -or $CustomOverviews.Error) {
+			Write-Error "An error occurred trying to get the existing custom overview from ITG. Exiting..."
+			Write-Error $CustomOverviews.Error
+			exit 1
+		}
+
 		$WANCustomOverviews = $CustomOverviews.data | Where-Object { $_.attributes.name -like "WAN: *" }
 		$LANCustomOverviews = $CustomOverviews.data | Where-Object { $_.attributes.name -like "LAN: *" }
 	}

@@ -1004,11 +1004,26 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		while ($ITG_Devices.links.next) {
 			$i++
 			$Configurations_Next = Get-ITGlueConfigurations -page_size "1000" -page_number $i -organization_id $ITG_ID
+			if (!$Configurations_Next -or $Configurations_Next.Error) {
+				# We got an error querying configurations, wait and try again
+				Start-Sleep -Seconds 2
+				$Configurations_Next = Get-ITGlueConfigurations -page_size "1000" -page_number $i -organization_id $ITG_ID
+		
+				if (!$Configurations_Next -or $Configurations_Next.Error) {
+					Write-PSFMessage -Level Error -Message "An error occurred trying to get the existing configurations from ITG. Exiting..."
+					Write-PSFMessage -Level Error -Message $Configurations_Next.Error
+					exit 1
+				}
+			}
 			$ITG_Devices.data += $Configurations_Next.data
 			$ITG_Devices.links = $Configurations_Next.links
 		}
 		if ($ITG_Devices -and $ITG_Devices.data) {
 			$ITG_Devices = $ITG_Devices.data
+		}
+		if (!$ITG_Devices) {
+			Write-Warning "There was an issue getting the Configurations from ITG. Exiting..."
+			exit 1
 		}
 	}
 	$ITG_DevicesHash = @{}
@@ -1035,8 +1050,17 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	$Azure_Devices = @()
 	$Intune_Devices = @()
 	if ($AzureConnected) {
-		$Azure_Devices = Get-MgDevice -All | Where-Object { $_.OperatingSystem -notin @("Android", "iOS") }
-		$Intune_Devices = Get-MgDeviceManagementManagedDevice | Where-Object { $_.OperatingSystem -notin @("Android", "iOS") }
+		try {
+			$Azure_Devices = Get-MgDevice -All | Where-Object { $_.OperatingSystem -notin @("Android", "iOS") }
+		} catch {
+			Write-Warning "GDAP is not properly setup. Could not query Azure devices."
+			$Azure_Devices = @()
+		}
+		try {
+			$Intune_Devices = Get-MgDeviceManagementManagedDevice | Where-Object { $_.OperatingSystem -notin @("Android", "iOS") }
+		} catch {
+			$Intune_Devices = @()
+		}
 	}
 	$Azure_DevicesHash = @{}
 	$Intune_DevicesHash = @{}
@@ -3284,74 +3308,80 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					}
 					
 					$ExistingFlexAsset = Get-ITGlueFlexibleAssets -filter_flexible_asset_type_id $BillingFilterID.id -filter_organization_id $ITG_ID -include attachments
-					$ExistingFlexAsset.data = $ExistingFlexAsset.data | Select-Object -First 1
 
-					if ($ExistingFlexAsset -and $ExistingFlexAsset.data.attributes.traits) {
-						$ExistingFlexAsset.data.attributes.traits.PSObject.Properties | ForEach-Object {
-							if ($_.name -eq "billing-report-user-list" -or $_.name -eq "billing-report-device-list") {
-								return
+					if (!$ExistingFlexAsset -or $ExistingFlexAsset.Error) {
+						Write-PSFMessage -Level Error -Message "An error occurred trying to get the existing billing flex asset from ITG. Skipping updating billing asset."
+						Write-PSFMessage -Level Error -Message $ExistingFlexAsset.Error
+					} else {
+						$ExistingFlexAsset.data = $ExistingFlexAsset.data | Select-Object -First 1
+
+						if ($ExistingFlexAsset -and $ExistingFlexAsset.data.attributes.traits) {
+							$ExistingFlexAsset.data.attributes.traits.PSObject.Properties | ForEach-Object {
+								if ($_.name -eq "billing-report-user-list" -or $_.name -eq "billing-report-device-list") {
+									return
+								}
+								$property = $_.name
+								$FlexAssetBody.attributes.traits.$property = $_.value
 							}
-							$property = $_.name
-							$FlexAssetBody.attributes.traits.$property = $_.value
 						}
-					}
 
-					# Add the new data to be uploaded
-					$FlexAssetBody.attributes.traits."billed-by" = "Computer"
-					$FlexAssetBody.attributes.traits."number-of-billed-computers" = ($FullDeviceCounts | Where-Object { $_.Type -eq "Workstations" }).UnBilledCount
-					$FlexAssetBody.attributes.traits."number-of-billed-servers" = ($FullDeviceCounts | Where-Object { $_.Type -eq "Servers" }).BilledCount
-					$FlexAssetBody.attributes.traits."device-breakdown" = $DeviceBreakdownTable
-					$FlexAssetBody.attributes.traits.Remove("number-of-billed-users")
-					$FlexAssetBody.attributes.traits.Remove("user-breakdown")
-					$FlexAssetBody.attributes.traits."billing-report-device-list" = @{
-						content 	= $ReportEncoded
-						file_name 	= $BillingDeviceFileName
-					}
+						# Add the new data to be uploaded
+						$FlexAssetBody.attributes.traits."billed-by" = "Computer"
+						$FlexAssetBody.attributes.traits."number-of-billed-computers" = ($FullDeviceCounts | Where-Object { $_.Type -eq "Workstations" }).UnBilledCount
+						$FlexAssetBody.attributes.traits."number-of-billed-servers" = ($FullDeviceCounts | Where-Object { $_.Type -eq "Servers" }).BilledCount
+						$FlexAssetBody.attributes.traits."device-breakdown" = $DeviceBreakdownTable
+						$FlexAssetBody.attributes.traits.Remove("number-of-billed-users")
+						$FlexAssetBody.attributes.traits.Remove("user-breakdown")
+						$FlexAssetBody.attributes.traits."billing-report-device-list" = @{
+							content 	= $ReportEncoded
+							file_name 	= $BillingDeviceFileName
+						}
 
-					# If billing report is already an attachment, delete so we can replace it
-					if ($ExistingFlexAsset -and $ExistingFlexAsset.data.id -and $ExistingFlexAsset.included) {
-						$Attachments = $ExistingFlexAsset.included | Where-Object {$_.type -eq 'attachments'}
-						if ($Attachments -and ($Attachments | Measure-Object).Count -gt 0 -and $Attachments.attributes) {
-							$MonthsAttachment = $Attachments.attributes | Where-Object { $_.name -like $BillingDeviceFileName + '*' -or $_."attachment-file-name" -like $BillingDeviceFileName + '*' }
-							if ($MonthsAttachment) {
-								$data = @{ 
-									'type' = 'attachments'
-									'attributes' = @{
-										'id' = $MonthsAttachment.id
+						# If billing report is already an attachment, delete so we can replace it
+						if ($ExistingFlexAsset -and $ExistingFlexAsset.data.id -and $ExistingFlexAsset.included) {
+							$Attachments = $ExistingFlexAsset.included | Where-Object {$_.type -eq 'attachments'}
+							if ($Attachments -and ($Attachments | Measure-Object).Count -gt 0 -and $Attachments.attributes) {
+								$MonthsAttachment = $Attachments.attributes | Where-Object { $_.name -like $BillingDeviceFileName + '*' -or $_."attachment-file-name" -like $BillingDeviceFileName + '*' }
+								if ($MonthsAttachment) {
+									$data = @{ 
+										'type' = 'attachments'
+										'attributes' = @{
+											'id' = $MonthsAttachment.id
+										}
+									}
+									Remove-ITGlueAttachments -resource_type 'flexible_assets' -resource_id $ExistingFlexAsset.data.id -data $data | Out-Null
+								}
+							}
+						}
+
+						# Upload
+						if ($ExistingFlexAsset -and $ExistingFlexAsset.data.id) {
+							Set-ITGlueFlexibleAssets -id $ExistingFlexAsset.data.id -data $FlexAssetBody | Out-Null
+							Write-Host "Updated existing $BillingFlexAssetName asset."
+							Write-PSFMessage -Level Verbose -Message "Updated existing: $BillingFlexAssetName asset"
+						} else {
+							$FlexAssetBody.attributes."organization-id" = $ITG_ID
+							$FlexAssetBody.attributes."flexible-asset-type-id" = $BillingFilterID.id
+							$FlexAssetBody.attributes.traits."billed-by" = "Computer"
+							$ExistingFlexAsset = New-ITGlueFlexibleAssets -data $FlexAssetBody
+							Write-Host "Uploaded a new $BillingFlexAssetName asset."
+							Write-PSFMessage -Level Verbose -Message "Uploaded new: $BillingFlexAssetName asset"
+						}
+
+						if ($ExistingFlexAsset -and $ExistingFlexAsset.data.id) {
+							$data = @{ 
+								'type' = 'attachments'
+								'attributes' = @{
+									'attachment' = @{
+										'content' = $ReportEncoded
+										'file_name'	= $BillingDeviceFileName
 									}
 								}
-								Remove-ITGlueAttachments -resource_type 'flexible_assets' -resource_id $ExistingFlexAsset.data.id -data $data | Out-Null
 							}
+							New-ITGlueAttachments -resource_type 'flexible_assets' -resource_id $ExistingFlexAsset.data.id -data $data | Out-Null
+							Write-Host "Billing report uploaded and attached." -ForegroundColor Green
+							Write-PSFMessage -Level Verbose -Message "Uploaded: Billing report"
 						}
-					}
-
-					# Upload
-					if ($ExistingFlexAsset -and $ExistingFlexAsset.data.id) {
-						Set-ITGlueFlexibleAssets -id $ExistingFlexAsset.data.id -data $FlexAssetBody | Out-Null
-						Write-Host "Updated existing $BillingFlexAssetName asset."
-						Write-PSFMessage -Level Verbose -Message "Updated existing: $BillingFlexAssetName asset"
-					} else {
-						$FlexAssetBody.attributes."organization-id" = $ITG_ID
-						$FlexAssetBody.attributes."flexible-asset-type-id" = $BillingFilterID.id
-						$FlexAssetBody.attributes.traits."billed-by" = "Computer"
-						$ExistingFlexAsset = New-ITGlueFlexibleAssets -data $FlexAssetBody
-						Write-Host "Uploaded a new $BillingFlexAssetName asset."
-						Write-PSFMessage -Level Verbose -Message "Uploaded new: $BillingFlexAssetName asset"
-					}
-
-					if ($ExistingFlexAsset -and $ExistingFlexAsset.data.id) {
-						$data = @{ 
-							'type' = 'attachments'
-							'attributes' = @{
-								'attachment' = @{
-									'content' = $ReportEncoded
-									'file_name'	= $BillingDeviceFileName
-								}
-							}
-						}
-						New-ITGlueAttachments -resource_type 'flexible_assets' -resource_id $ExistingFlexAsset.data.id -data $data | Out-Null
-						Write-Host "Billing report uploaded and attached." -ForegroundColor Green
-						Write-PSFMessage -Level Verbose -Message "Uploaded: Billing report"
 					}
 				} else {
 					Write-Host "Something went wrong when trying to find the $BillingFlexAssetName asset type. Could not update IT Glue." -ForegroundColor Red

@@ -110,6 +110,11 @@ if ($ITGAPIKey.Key) {
 	$OverviewFilterID = (Get-ITGlueFlexibleAssetTypes -filter_name $OverviewFlexAssetName).data
 	$ScriptsLastRunFilterID = (Get-ITGlueFlexibleAssetTypes -filter_name $ScriptsLastRunFlexAssetName).data
 	$ITGConnected = $true
+
+	if (!$WANFilterID -or !$LANFilterID -or !$OverviewFilterID) {
+		Write-PSFMessage -Level Error -Message "Could not get all of the flex asset filter id's from ITG. Exiting..."
+		exit 1
+	}
 }
 
 # Connect to Sophos
@@ -931,7 +936,7 @@ if ($true) {
 					return $true
 				}
 			} catch {
-				Write-Error "Could not auto-delete Sophos device '$Sophos_Device_ID' for the reason: " + $_.Exception.Message
+				Write-PSFMessage -Level Error -Message "Could not auto-delete Sophos device '$Sophos_Device_ID' for the reason: " + $_.Exception.Message
 			}
 		}
 		return $false
@@ -965,7 +970,7 @@ if ($true) {
 			Set-ITGlueConfigurations -id $ITG_Device_ID -data $UpdatedConfig
 			return $true
 		} catch {
-			Write-Error "Could not archive ITG configuration '$ITG_Device_ID' for the reason: " + $_.Exception.Message
+			Write-PSFMessage -Level Error -Message "Could not archive ITG configuration '$ITG_Device_ID' for the reason: " + $_.Exception.Message
 			return $false
 		}
 	}
@@ -1433,11 +1438,26 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		while ($ITG_Devices.links.next) {
 			$i++
 			$Configurations_Next = Get-ITGlueConfigurations -page_size "1000" -page_number $i -organization_id $ITG_ID
+			if (!$Configurations_Next -or $Configurations_Next.Error) {
+				# We got an error querying configurations, wait and try again
+				Start-Sleep -Seconds 2
+				$Configurations_Next = Get-ITGlueConfigurations -page_size "1000" -page_number $i -organization_id $ITG_ID
+		
+				if (!$Configurations_Next -or $Configurations_Next.Error) {
+					Write-PSFMessage -Level Error -Message "An error occurred trying to get the existing configurations from ITG. Exiting..."
+					Write-PSFMessage -Level Error -Message $Configurations_Next.Error
+					exit 1
+				}
+			}
 			$ITG_Devices.data += $Configurations_Next.data
 			$ITG_Devices.links = $Configurations_Next.links
 		}
 		if ($ITG_Devices -and $ITG_Devices.data) {
 			$ITG_Devices = $ITG_Devices.data
+		}
+		if (!$ITG_Devices) {
+			Write-Warning "There was an issue getting the Configurations from ITG. Skipping org..."
+			continue
 		}
 	}
 	$ITG_DevicesHash = @{}
@@ -1449,8 +1469,17 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	$Azure_Devices = @()
 	$Intune_Devices = @()
 	if ($AzureConnected) {
-		$Azure_Devices = Get-MgDevice -All | Where-Object { $_.OperatingSystem -notin @("Android", "iOS") }
-		$Intune_Devices = Get-MgDeviceManagementManagedDevice | Where-Object { $_.OperatingSystem -notin @("Android", "iOS") }
+		try {
+			$Azure_Devices = Get-MgDevice -All | Where-Object { $_.OperatingSystem -notin @("Android", "iOS") }
+		} catch {
+			Write-Warning "GDAP is not properly setup. Could not query Azure devices."
+			$Azure_Devices = @()
+		}
+		try {
+			$Intune_Devices = Get-MgDeviceManagementManagedDevice | Where-Object { $_.OperatingSystem -notin @("Android", "iOS") }
+		} catch {
+			$Intune_Devices = @()
+		}
 	}
 	$Azure_DevicesHash = @{}
 	$Intune_DevicesHash = @{}
@@ -4017,21 +4046,57 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		Write-Host "Updating device locations..."
 		$WANs = Get-ITGlueFlexibleAssets -page_size 1000 -filter_flexible_asset_type_id $WANFilterID.id -filter_organization_id $ITG_ID
 		$LANs = Get-ITGlueFlexibleAssets -page_size 1000 -filter_flexible_asset_type_id $LANFilterID.id -filter_organization_id $ITG_ID
+		if (!$WANs -or $WANs.Error) {
+			Write-PSFMessage -Level Error -Message "An error occurred trying to get the existing WAN assets from ITG. Exiting..."
+			Write-PSFMessage -Level Error -Message $WANs.Error
+			$WANs = @()
+		}
+		if (!$LANs -or $LANs.Error) {
+			Write-PSFMessage -Level Error -Message "An error occurred trying to get the existing LAN assets from ITG. Exiting..."
+			Write-PSFMessage -Level Error -Message $LANs.Error
+			$LANs = @()
+		}
 		if (!$ITGLocations) {
 			$ITGLocations = Get-ITGlueLocations -org_id $ITG_ID
-			$ITGLocations = $ITGLocations.data
+			if (!$ITGLocations -or $ITGLocations.Error) {
+				Write-PSFMessage -Level Error -Message "An error occurred trying to get the existing location assets from ITG. Exiting..."
+				Write-PSFMessage -Level Error -Message $ITGLocations.Error
+				$ITGLocations = @()
+			} else {
+				$ITGLocations = $ITGLocations.data
+			}
 		}
+
+		$UpdateOverview = $false
 		if ($OverviewFilterID) {
+			$UpdateOverview = $true
 			$CustomOverviews = Get-ITGlueFlexibleAssets -page_size 1000 -filter_flexible_asset_type_id $OverviewFilterID.id -filter_organization_id $ITG_ID
 			$i = 1
 			while ($CustomOverviews.links.next) {
 				$i++
 				$CustomOverviews_Next = Get-ITGlueFlexibleAssets -page_size 1000 -page_number $i -filter_flexible_asset_type_id $OverviewFilterID.id -filter_organization_id $ITG_ID
+				if (!$CustomOverviews_Next -or $CustomOverviews_Next.Error) {
+					# We got an error querying configurations, wait and try again
+					Start-Sleep -Seconds 2
+					$CustomOverviews_Next = Get-ITGlueFlexibleAssets -page_size 1000 -page_number $i -filter_flexible_asset_type_id $OverviewFilterID.id -filter_organization_id $ITG_ID
+			
+					if (!$CustomOverviews_Next -or $CustomOverviews_Next.Error) {
+						Write-PSFMessage -Level Error -Message "An error occurred trying to get the existing custom overviews from ITG. Exiting..."
+						Write-PSFMessage -Level Error -Message $CustomOverviews_Next.Error
+						$UpdateOverview = $false
+						break
+					}
+				}
 				$CustomOverviews.data += $CustomOverviews_Next.data
 				$CustomOverviews.links = $CustomOverviews_Next.links
 			}
-			$WANCustomOverviews = $CustomOverviews.data | Where-Object { $_.attributes.name -like "WAN: *" }
-			$LANCustomOverviews = $CustomOverviews.data | Where-Object { $_.attributes.name -like "LAN: *" }
+			
+			if ($CustomOverviews -and $CustomOverviews.data) {
+				$WANCustomOverviews = $CustomOverviews.data | Where-Object { $_.attributes.name -like "WAN: *" }
+				$LANCustomOverviews = $CustomOverviews.data | Where-Object { $_.attributes.name -like "LAN: *" }
+			} else {
+				$UpdateOverview = $false
+			}
 		}
 		$IPRegex = "\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(-(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)?)?(\/[1-3][0-9])?\b"
 
@@ -4405,7 +4470,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			}
 
 			# Create custom WAN & LAN overviews
-			if ($WANDevices) {
+			if ($WANDevices -and $UpdateOverview) {
 				foreach ($WAN_ID in $WANDevices.keys) {
 					$WAN = $WANs | Where-Object { $_.id -eq $WAN_ID }
 					$Title = "WAN: Seen Devices - $($WAN.attributes.traits.label)"
@@ -4622,7 +4687,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				}
 			}
 
-			if ($LANDevices) {
+			if ($LANDevices -and $UpdateOverview) {
 				foreach ($LAN_ID in $LANDevices.keys) {
 					$LAN = $LANs | Where-Object { $_.id -eq $LAN_ID }
 					$Title = "LAN: Seen Devices - $($LAN.attributes.traits.name)"
