@@ -222,7 +222,7 @@ while ($attempt -ge 0) {
 	}
 }
 
-# Get CPU data and Download new CPU data if older than 2 weeks
+<# # Get CPU data and Download new CPU data if older than 2 weeks
 if ($CPUDataLocation -and (Test-Path -Path ($CPUDataLocation + "\lastUpdated.txt"))) {
 	$CPUDataLastUpdated = Get-Content -Path ($CPUDataLocation + "\lastUpdated.txt") -Raw
 	if ([string]$CPUDataLastUpdated -as [DateTime])   {
@@ -244,7 +244,7 @@ if ($CPUDataLocation -and (Test-Path -Path ($CPUDataLocation + "\cpu_matching.js
 	$CPUMatching = @()
 }
 
-if ($CPUDataLastUpdated -and $CPUDataLastUpdated.AddDays(14) -lt (Get-Date)) {
+if (($CPUDataLastUpdated -and $CPUDataLastUpdated.AddDays(14) -lt (Get-Date)) -or !$CPUDetails) {
 	$NewCPUList = [System.Collections.ArrayList]@()
 	$UpdateSuccessful = $true
 	$headers=@{}
@@ -291,7 +291,7 @@ if ($CPUDataLastUpdated -and $CPUDataLastUpdated.AddDays(14) -lt (Get-Date)) {
 $CPUDetailsHash = @{}
 foreach ($CPU in $CPUDetails) { 
 	$CPUDetailsHash[$CPU.ID] = $CPU
-}
+} #>
 
 #################
 # Functions (the 'if' just allows me to collapse them all)
@@ -2623,7 +2623,8 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					$RMMAntivirus = $RMMDevice.Antivirus
 				}
 
-				# get cpu performance score
+				$CPUReleaseDate = $false
+				<# # get cpu performance score
 				if ($CPUs) {
 					foreach ($CPU in $CPUs) {
 						$CPUMatch = $false
@@ -2694,7 +2695,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 							$CPUName = $CleanName
 						}
 					}
-				}
+				} #>
 
 				# calculate device age and replacement date
 				if ($WarrantyStart -and [string]$WarrantyStart -as [DateTime]) {
@@ -2929,7 +2930,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			}
 		}
 
-		$CPUMatching | ConvertTo-Json | Out-File -FilePath ($CPUDataLocation + "\cpu_matching.json")
+		# $CPUMatching | ConvertTo-Json | Out-File -FilePath ($CPUDataLocation + "\cpu_matching.json")
 
 		if (($BillingDevices | Measure-Object).count -gt 0) {
 			# Get device type counts
