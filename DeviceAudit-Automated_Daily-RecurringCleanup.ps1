@@ -1585,7 +1585,11 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					} else {
 						$Username = $RMMDevice."Last User"
 					}
-					$Domain = $RMMDevice.domain
+					if ($RMMDevice."Last User" -like "AzureAD\*") {
+						$Domain = "AzureAD"
+					} else {
+						$Domain = $RMMDevice.domain
+					}
 					if (!$Domain -or $Domain -like $Hostname) {
 						$Domain = $false
 					}
@@ -1805,6 +1809,14 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						Set-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Computers" -Id $ComputerID -DocumentBody ($UpdatedComputer | ConvertTo-Json) -PartitionKey 'computer' | Out-Null
 					}
 				}
+
+				if ($Domain -and $Domain -ne "WORKGROUP") { 
+					$DomainOrLocal = "Domain"
+				} elseif ($Domain -and $Domain -eq "AzureAD") {
+					$DomainOrLocal = "AzureAD"
+				} else { 
+					$DomainOrLocal = "Local"
+				}
 	
 				# Get the User ID, if not already in DB, add a new user
 				$User = $ExistingUsers | Where-Object { $_.Username -like $Username }
@@ -1815,7 +1827,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					$User = @{
 						id = $UserID
 						Username = $Username
-						DomainOrLocal = if ($Domain -and $Domain -ne "WORKGROUP") { "Domain" } else { "Local" }
+						DomainOrLocal = $DomainOrLocal
 						Domain = $Domain
 						ADUsername = $null
 						O365Email = $null
@@ -1828,8 +1840,8 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					# If changing fields, update in user audit as well
 					$User = $User | Select-Object Id, Domain, DomainOrLocal, Username, LastUpdated, type, O365Email, ITG_ID, ADUsername
 					$UserID = $User[0].Id
-					if (!$User.DomainOrLocal) {
-						$User.DomainOrLocal = if ($Domain -and $Domain -ne "WORKGROUP") { "Domain" } else { "Local" }
+					if (!$User.DomainOrLocal -or $User.Domain -ne $Domain) {
+						$User.DomainOrLocal = $DomainOrLocal
 						$User.Domain = $Domain
 						$User.LastUpdated = $Now_UTC
 						Set-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Users" -Id $UserID -DocumentBody ($User | ConvertTo-Json) -PartitionKey 'user' | Out-Null
