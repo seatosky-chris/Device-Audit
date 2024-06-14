@@ -4314,10 +4314,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					}
 				}
 
-				if ($Domain -and $Domain -ne "WORKGROUP") { 
-					$DomainOrLocal = "Domain"
-				} elseif ($Domain -and $Domain -eq "AzureAD") {
+				if ($Domain -and $Domain -eq "AzureAD") { 
 					$DomainOrLocal = "AzureAD"
+				} elseif ($Domain -and $Domain -ne "WORKGROUP") {
+					$DomainOrLocal = "Domain"
 				} else { 
 					$DomainOrLocal = "Local"
 				}
@@ -4344,7 +4344,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					# If changing fields, update in user audit as well
 					$User = $User | Select-Object Id, Domain, DomainOrLocal, Username, LastUpdated, type, O365Email, ITG_ID, ADUsername
 					$UserID = $User[0].Id
-					if (!$User.DomainOrLocal -or $User.Domain -ne $Domain) {
+					if (!$User.DomainOrLocal -or $User.Domain -ne $Domain -or $User.DomainOrLocal -ne $DomainOrLocal) {
 						$User.DomainOrLocal = $DomainOrLocal
 						$User.Domain = $Domain
 						$User.LastUpdated = $Now_UTC
