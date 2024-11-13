@@ -237,8 +237,8 @@ if ($true) {
 	}
 
 	# Function for logging automated changes (installs, deletions, etc.)
-	# $ServiceTarget is 'rmm', 'sc', 'sophos', 'jc', 'itg', or 'autotask'
-	function log_change($Company_Acronym, $ServiceTarget, $RMM_Device_ID, $SC_Device_ID, $Sophos_Device_ID, $JC_Device_ID = $false, $ChangeType, $Hostname = "", $Reason = "") {
+	# $ServiceTarget is 'rmm', 'sc', 'sophos', 'jc', 'ninite', 'itg', or 'autotask'
+	function log_change($Company_Acronym, $ServiceTarget, $RMM_Device_ID, $SC_Device_ID, $Sophos_Device_ID, $JC_Device_ID = $false, $Ninite_Device_ID = $false, $ChangeType, $Hostname = "", $Reason = "") {
 		if (!$LogLocation) {
 			return $false
 		}
@@ -262,6 +262,7 @@ if ($true) {
 			sc_id = $SC_Device_ID
 			sophos_id = $Sophos_Device_ID
 			jc_id = $JC_Device_ID
+			ninite_id = $Ninite_Device_ID
 			service_target = $ServiceTarget
 			change = $ChangeType
 			hostname = $Hostname
@@ -277,7 +278,7 @@ if ($true) {
 	# StartTime is the unixtimestamp to start selection from (inclusive)
 	# EndTime is the unixtimestamp to end selection at (exclusive) (if you set it to 'now' it will automatically calculate the current timestamp)
 	# the remainder are optional and can be used as filters, hostname and reason support wildcards
-	function log_query($LogHistory, $StartTime, $EndTime, $ServiceTarget = "", $RMM_Device_ID = "", $SC_Device_ID = "", $Sophos_Device_ID = "", $ChangeType = "", $Hostname = "", $Reason = "") {
+	function log_query($LogHistory, $StartTime, $EndTime, $ServiceTarget = "", $RMM_Device_ID = "", $SC_Device_ID = "", $Sophos_Device_ID = "", $Ninite_Device_ID = "", $ChangeType = "", $Hostname = "", $Reason = "") {
 		if ($EndTime -eq 'now') {
 			$EndTime = [int](New-TimeSpan -Start (Get-Date "01/01/1970") -End (Get-Date).ToUniversalTime()).TotalSeconds
 		}
@@ -297,6 +298,9 @@ if ($true) {
 		if ($Sophos_Device_ID) {
 			$History_Filtered = $History_Filtered | Where-Object { $Sophos_Device_ID -in $_.sophos_id }
 		}
+		if ($Ninite_Device_ID) {
+			$History_Filtered = $History_Filtered | Where-Object { $Ninite_Device_ID -in $_.ninite_id }
+		}
 		if ($ChangeType) {
 			$History_Filtered = $History_Filtered | Where-Object { $_.change -eq $ChangeType }
 		}
@@ -311,8 +315,8 @@ if ($true) {
 	}
 
 	# Helper function that queries the log based on the filters and returns the count of entries found
-	function log_attempt_count($LogHistory, $ServiceTarget = "", $RMM_Device_ID = "", $SC_Device_ID = "", $Sophos_Device_ID = "", $ChangeType = "", $Hostname = "", $Reason = "") {
-		$History = log_query -LogHistory $LogHistory -StartTime 0 -EndTime 'now' -ServiceTarget $ServiceTarget -RMM_Device_ID $RMM_Device_ID -SC_Device_ID $SC_Device_ID -Sophos_Device_ID $Sophos_Device_ID -ChangeType $ChangeType -Hostname $Hostname -Reason $Reason
+	function log_attempt_count($LogHistory, $ServiceTarget = "", $RMM_Device_ID = "", $SC_Device_ID = "", $Sophos_Device_ID = "", $Ninite_Device_ID = "", $ChangeType = "", $Hostname = "", $Reason = "") {
+		$History = log_query -LogHistory $LogHistory -StartTime 0 -EndTime 'now' -ServiceTarget $ServiceTarget -RMM_Device_ID $RMM_Device_ID -SC_Device_ID $SC_Device_ID -Sophos_Device_ID $Sophos_Device_ID -Ninite_Device_ID $Ninite_Device_ID -ChangeType $ChangeType -Hostname $Hostname -Reason $Reason
 		return ($History | Measure-Object).Count
 	}
 
@@ -324,7 +328,7 @@ if ($true) {
 	}
 
 	# Function for querying repair tickets based on the possible filters
-	# $ServiceTarget is 'rmm', 'sc', or 'sophos'
+	# $ServiceTarget is 'rmm', 'sc', 'sophos', or 'ninite'
 	# $Hostname can be a single hostname or an array of hostnames to check for
 	function repair_tickets($ServiceTarget = "", $Hostname = "") {
 		if ($ServiceTarget -eq 'rmm') {
@@ -333,6 +337,8 @@ if ($true) {
 			$RepairTickets_ByService = $RepairTickets | Where-Object { $_.title -like "SC *" -or $_.title -like "* SC" -or $_.title -like "* SC *" -or $_.title -like "*ScreenConnect*" }
 		} elseif ($ServiceTarget -eq 'sophos') {
 			$RepairTickets_ByService = $RepairTickets | Where-Object { $_.title -like "Sophos *" -or $_.title -like "* Sophos" -or $_.title -like "* Sophos *" }
+		} elseif ($ServiceTarget -eq 'ninite') {
+			$RepairTickets_ByService = $RepairTickets | Where-Object { $_.title -like "Ninite *" -or $_.title -like "* Ninite" -or $_.title -like "* Ninite *" }
 		} else {
 			$RepairTickets_ByService = $RepairTickets
 		}
@@ -355,12 +361,12 @@ if ($true) {
 	# and attempts have been made for the past 2 weeks
 	# If so, an email is sent if one hasn't already been sent in the last 2 weeks, and the email is logged
 	# $ErrorMessage can use HTML and it will become the main body of the email sent
-	function check_failed_attempts($LogHistory, $Company_Acronym, $ErrorMessage, $ServiceTarget, $RMM_Device_ID, $SC_Device_ID, $Sophos_Device_ID, $ChangeType, $Hostname = "", $Reason = "") {
+	function check_failed_attempts($LogHistory, $Company_Acronym, $ErrorMessage, $ServiceTarget, $RMM_Device_ID, $SC_Device_ID, $Sophos_Device_ID, $Ninite_Device_ID, $ChangeType, $Hostname = "", $Reason = "") {
 		$TwoWeeksAgo = [int](New-TimeSpan -Start (Get-Date "01/01/1970") -End (Get-Date).AddDays(-14).ToUniversalTime()).TotalSeconds
 		$TenDays = [int](New-TimeSpan -Start (Get-Date).AddDays(-10).ToUniversalTime() -End (Get-Date).ToUniversalTime()).TotalSeconds
 
 		# first check if a repair ticket already exists for this device/service
-		if ($ServiceTarget -in ("rmm", "sc", "sophos")) {
+		if ($ServiceTarget -in ("rmm", "sc", "sophos", "ninite")) {
 			$RepairTickets_Filtered = repair_tickets -ServiceTarget $ServiceTarget -Hostname $Hostname
 			if (($RepairTickets_Filtered | Measure-Object).count -gt 0) {
 				break;
@@ -394,6 +400,9 @@ if ($true) {
 		} elseif ($ServiceTarget -eq 'sophos') {
 			$ID_Params."Sophos_Device_ID" = $Sophos_Device_ID
 			$EmailLink = "https://cloud.sophos.com/manage/devices/computers/$($Sophos_Device_ID)"
+		} elseif ($ServiceTarget -eq 'ninite') {
+			$ID_Params."Ninite_Device_ID" = $Ninite_Device_ID
+			$EmailLink = ""
 		}
 
 		$EmailQuery_Params = @{
@@ -589,6 +598,36 @@ if ($true) {
 		$DevicesOutput
 		return
 	}
+	
+	function compare_activity_ninite($DeviceIDs) {
+		if (!$Ninite_DevicesHash) {
+			return @()
+		}
+
+		$NiniteDevices = @()
+		foreach ($DeviceID in $DeviceIDs) {
+			$NiniteDevices += $Ninite_DevicesHash[$DeviceID]
+		}
+		$DevicesOutput = @()
+
+		foreach ($Device in $NiniteDevices) {
+			$DeviceOutputObj = [PsCustomObject]@{
+				type = "ninite"
+				id = $Device.id
+				last_active = $null
+			}
+
+			if ($Device.last_seen -and [string]$Device.last_seen -as [DateTime]) {
+				$DeviceOutputObj.last_active = [DateTime]$Device.last_seen
+				$DevicesOutput += $DeviceOutputObj
+			}
+		}
+
+		$DevicesOutput = $DevicesOutput | Sort-Object last_active -Desc
+
+		$DevicesOutput
+		return
+	}
 
 	function compare_activity_azure($DeviceIDs) {
 		if (!$Azure_DevicesHash) {
@@ -650,7 +689,7 @@ if ($true) {
 		return
 	}
 
-	# Helper function that takes a $MatchedDevices object and returns the activity comparison for SC, RMM, Sophos, and (if applicable) Azure & Intune
+	# Helper function that takes a $MatchedDevices object and returns the activity comparison for SC, RMM, Sophos, and (if applicable) Azure, Intune, JC &/or Ninite
 	function compare_activity($MatchedDevice) {
 		$Activity = @{}
 
@@ -667,6 +706,11 @@ if ($true) {
 		if ($MatchedDevice.sophos_matches -and $MatchedDevice.sophos_matches.count -gt 0) {
 			$SophosActivity = compare_activity_sophos $MatchedDevice.sophos_matches
 			$Activity.sophos = $SophosActivity | Sort-Object last_active -Descending | Select-Object -First 1
+		}
+
+		if ($NiniteAuthResponse -and $MatchedDevice.ninite_matches -and $MatchedDevice.ninite_matches.count -gt 0) {
+			$NiniteActivity = compare_activity_ninite $MatchedDevice.ninite_matches
+			$Activity.ninite = $NiniteActivity | Sort-Object last_active -Descending | Select-Object -First 1
 		}
 
 		if ($JCConnected -and $MatchedDevice.jc_matches -and $MatchedDevice.jc_matches.count -gt 0) {
@@ -690,7 +734,7 @@ if ($true) {
 
 	# Adds a device to the install queue json file (creates the file if need be)
 	# Either set $SC_ID or $RMM_ID, this is the device used for the install
-	# Set $ToInstall to what needs to be installed ("sc", or "rmm")
+	# Set $ToInstall to what needs to be installed ("sc", "rmm", or "ninite")
 	function add_device_to_install_queue($SC_ID = $false, $RMM_ID = $false, $ToInstall = $false) {
 		$FromDeviceType = $false
 		if ($SC_ID) {
@@ -739,7 +783,7 @@ if ($true) {
 
 	# Removes a device from the install queue json file
 	# Either set $SC_ID or $RMM_ID, this is the device used for the install
-	# Set $ToInstall to what needed to be installed ("sc" or "rmm"), if left $false will remove for all $ToInstall types
+	# Set $ToInstall to what needed to be installed ("sc", "rmm", or "ninite"), if left $false will remove for all $ToInstall types
 	function remove_device_from_install_queue($SC_ID = $false, $RMM_ID = $false, $ToInstall = $false) {
 		$FromDeviceType = $false
 		if ($SC_ID) {
@@ -785,13 +829,15 @@ if ($true) {
 
 	# Helper function that checks a device from the $MatchedDevices array against the $Ignore_Installs config value and returns true if it should be ignored
 	# Also ignores Sophos on Hyper-V hosts via a regex check
-	# $System should be 'sc', 'rmm', or 'sophos'
+	# $System should be 'sc', 'rmm', 'sophos', or 'ninite'
 	function ignore_install($Device, $System) {
 		if ($System -eq 'sc' -and $Ignore_Installs.SC -eq $true) {
 			return $true
 		} elseif ($System -eq 'rmm' -and $Ignore_Installs.RMM -eq $true) {
 			return $true
 		} elseif ($System -eq 'sophos' -and $Ignore_Installs.Sophos -eq $true) {
+			return $true
+		} elseif ($System -eq 'ninite' -and $Ignore_Installs.Ninite -eq $true) {
 			return $true
 		}
 
@@ -806,6 +852,8 @@ if ($true) {
 			$IgnoredDevices = $Ignore_Installs.RMM
 		} elseif ($System -eq 'sophos') {
 			$IgnoredDevices = $Ignore_Installs.Sophos
+		} elseif ($System -eq 'ninite') {
+			$IgnoredDevices = $Ignore_Installs.Ninite
 		}
 
 		if ($IgnoredDevices) {
@@ -814,6 +862,8 @@ if ($true) {
 			} elseif ($System -eq 'rmm' -and ($IgnoredDevices | Where-Object { $_ -in $Device.sc_hostname -or $_ -in $Device.sc_matches -or $_ -in $Device.sophos_hostname -or $_ -in $Device.sophos_matches } | Measure-Object).Count -gt 0) {
 				return $true
 			} elseif ($System -eq 'sophos' -and ($IgnoredDevices | Where-Object { $_ -in $Device.sc_hostname -or $_ -in $Device.sc_matches -or $_ -in $Device.rmm_hostname -or $_ -in $Device.rmm_matches  } | Measure-Object).Count -gt 0) {
+				return $true
+			} elseif ($System -eq 'ninite' -and ($IgnoredDevices | Where-Object { $_ -in $Device.sc_hostname -or $_ -in $Device.sc_matches -or $_ -in $Device.rmm_hostname -or $_ -in $Device.rmm_matches -or $_ -in $Device.sophos_hostname -or $_ -in $Device.sophos_matches } | Measure-Object).Count -gt 0) {
 				return $true
 			}
 		} else {
@@ -873,6 +923,29 @@ if ($true) {
 		} else {
 			Write-Warning "Could not delete device '$($JC_ID)' from JumpCloud."
 			return $false
+		}
+	}
+
+	# Deletes a device from Ninite
+	function delete_from_ninite($Ninite_ID, $NiniteWebSession, $NiniteHeader) {
+		$FormBody = @{
+			id = 1
+			jsonrpc = "2.0"
+			method = "delete_machine"
+			params = @{
+				machine_id = $Ninite_ID
+			}
+		} | ConvertTo-Json
+	
+		try {
+			$NiniteResponse = Invoke-WebRequest "$($Ninite_Login.BaseURI)remote/rpc_web" -WebSession $NiniteWebSession -Headers $NiniteHeader -Body $FormBody -Method 'POST' -ContentType 'application/json; charset=utf-8'
+		} catch {
+			Write-Warning "Could not delete device '$($Ninite_ID)' from Ninite."
+			return $false
+		}
+		$DeleteResponse = $NiniteResponse.Content | ConvertFrom-Json
+		if ($DeleteResponse -and $null -eq $DeleteResponse.result) {
+			return $true
 		}
 	}
 
@@ -1132,6 +1205,22 @@ if ($true) {
 		}
 		return $false
 	}
+
+	function install_ninite_using_rmm($RMM_Device) {
+		if (is_existing_rmm_job_active -RMM_Device $RMM_Device -JobType "install_ninite") {
+			return $false
+		}
+
+		if ($RMM_Device."Operating System" -like "*Windows*" -and $RMM_Device."Device Type" -notlike "*Server*") {
+			$Job = Set-DrmmDeviceQuickJob -DeviceUid $RMM_Device."Device UID" -jobName "Install Ninite on $($RMM_Device."Device Hostname")" -ComponentName "Ninite Agent Installer [WIN]"
+			if ($Job -and $Job.job -and $Job.job.uid) {
+				$Removed = remove_device_from_install_queue -RMM_ID $RMM_Device."Device UID" -ToInstall "ninite"
+				log_recent_rmm_job -RMM_Device $RMM_Device -JobType "install_ninite" -JobID $Job.job.uid
+				return $true
+			}
+		}
+		return $false
+	}
 }
 
 ### This code is unique for each company, lets loop through each company and run this code on each
@@ -1153,7 +1242,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	}
 
 	# Check to make sure there are installs to action
-	$PossibleTypes = @("sc", "rmm")
+	$PossibleTypes = @("sc", "rmm", "ninite")
 	$HasInstalls = $false
 	if ($InstallQueue.PSObject.Properties) {
 		foreach ($Type in $PossibleTypes) {
@@ -1470,6 +1559,47 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 							$AttemptCount = log_attempt_count @LogParams -LogHistory $LogHistory
 							$EmailError = "Attempted reinstall of SC on $($LogParams.Hostname). The Device Audit script has tried to reinstall SC via RMM $AttemptCount times now but it has not succeeded."
 							$LogParams.Reason = "SC reinstall attempted."
+
+							$AutoFix = $true
+							check_failed_attempts @LogParams -LogHistory $LogHistory -Company_Acronym $Company_Acronym -ErrorMessage $EmailError
+							log_change @LogParams -Company_Acronym $Company_Acronym
+						}
+					}
+				}
+			}
+		}
+
+		# Install Ninite by RMM
+		if ($InstallQueue.PSObject.Properties.Name -contains 'ninite' -and $InstallQueue.'ninite'.PSObject.Properties -and $InstallQueue.'ninite'.PSObject.Properties.Name -contains 'rmm' -and $InstallQueue.'ninite'.'rmm'.Count -gt 0) {
+			foreach ($DeviceID in ($InstallQueue.'ninite'.'rmm' | Sort-Object -Unique)) {
+				$RMMDevice = $RMM_DevicesHash[$DeviceID]
+
+				if ($RMMDevice.suspended -ne "True") {
+					$8HoursAgo = [int](New-TimeSpan -Start (Get-Date "01/01/1970") -End (Get-Date).AddHours(-8).ToUniversalTime()).TotalSeconds
+					$LogQuery_Params = @{
+						LogHistory = $LogHistory
+						StartTime = $8HoursAgo
+						EndTime = 'now'
+						ServiceTarget = 'rmm'
+						ChangeType = "install_ninite"
+						RMM_Device_ID = $RMMDevice."Device UID"
+						Hostname = $RMMDevice."Device Hostname"
+					}
+					$Install_Logs = log_query @LogQuery_Params
+					$LogCount = ($Install_Logs | Measure-Object).Count
+					
+					if ($LogCount -eq 0 -and ($RMMDevice.Status -eq "Online" -or $RMMDevice."Last Seen" -eq "Currently Online" -or ($RMMDevice."Last Seen" -as [DateTime]) -gt (Get-Date).AddMinutes(-30))) {
+						$LogParams = @{
+							ServiceTarget = "rmm"
+							RMM_Device_ID = $RMMDevice."Device UID"
+							ChangeType = "install_ninite"
+							Hostname = $RMMDevice."Device Hostname"
+						}
+
+						if (install_ninite_using_rmm -RMM_Device $RMMDevice) {
+							$AttemptCount = log_attempt_count @LogParams -LogHistory $LogHistory
+							$EmailError = "Attempted reinstall of Ninite on $($LogParams.Hostname). The Device Audit script has tried to reinstall Ninite via RMM $AttemptCount times now but it has not succeeded."
+							$LogParams.Reason = "Ninite reinstall attempted."
 
 							$AutoFix = $true
 							check_failed_attempts @LogParams -LogHistory $LogHistory -Company_Acronym $Company_Acronym -ErrorMessage $EmailError
@@ -1819,7 +1949,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				}
 	
 				# Get the User ID, if not already in DB, add a new user
-				$User = $ExistingUsers | Where-Object { $_.Username -like $Username }
+				$User = $ExistingUsers | Where-Object { $_.Username -like $Username } | Sort-Object LastUpdated | Select-Object -First 1
 	
 				if (!$User) {
 					# Add user

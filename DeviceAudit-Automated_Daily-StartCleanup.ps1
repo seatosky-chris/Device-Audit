@@ -79,8 +79,14 @@ If (Get-Module -ListAvailable -Name "Microsoft.Graph.DeviceManagement") {Import-
 If (Get-Module -ListAvailable -Name "CosmosDB") {Import-module CosmosDB } Else { install-module CosmosDB  -Force; import-module CosmosDB }
 If (Get-Module -ListAvailable -Name "DattoRMM") {Import-module DattoRMM -Force} Else { install-module DattoRMM -Force; import-module DattoRMM -Force}
 If (Get-Module -ListAvailable -Name "ITGlueAPI") {Import-module ITGlueAPI -Force} Else { install-module ITGlueAPI -Force; import-module ITGlueAPI -Force}
+If (Get-Module -ListAvailable -Name "AutotaskAPI") {Import-module AutotaskAPI -Force} Else { install-module AutotaskAPI -Force; import-module AutotaskAPI -Force}
 If (Get-Module -ListAvailable -Name "JumpCloud") {Import-module JumpCloud -Force} Else { install-module JumpCloud -Force; import-module JumpCloud -Force}
 If (Get-Module -ListAvailable -Name "Subnet") {Import-module Subnet -Force} Else { install-module Subnet -Force; import-module Subnet -Force}
+
+if ($Ninite_Login.MFA_Secret) {
+	Unblock-File -Path "$PSScriptRoot\GoogleAuthenticator.psm1"
+	Import-Module "$PSScriptRoot\GoogleAuthenticator.psm1"
+}
 
 # Connect to Azure
 if (Test-Path "$PSScriptRoot\Config Files\AzureServiceAccount.json") {
@@ -97,7 +103,7 @@ if (Test-Path "$PSScriptRoot\Config Files\AzureServiceAccount.json") {
 	}
 } else {
 	Connect-AzAccount
-	Save-AzContext -Path "$PSScriptRoot\Config Files\AzureServiceAccount.json"
+	Save-AzContext -Path "$PSScriptRoot\Config Files\AzureServiceAccount.json" -Force
 }
 
 # Connect to IT Glue
@@ -114,6 +120,30 @@ if ($ITGAPIKey.Key) {
 	if (!$WANFilterID -or !$LANFilterID -or !$OverviewFilterID) {
 		Write-PSFMessage -Level Error -Message "Could not get all of the flex asset filter id's from ITG. Exiting..."
 		exit 1
+	}
+}
+
+# Connect to Autotask
+$AutotaskConnected = $false
+if ($AutotaskAPIKey.Key) {
+	$Secret = ConvertTo-SecureString $AutotaskAPIKey.Key -AsPlainText -Force
+	$Creds = New-Object System.Management.Automation.PSCredential($AutotaskAPIKey.Username, $Secret)
+	Add-AutotaskAPIAuth -ApiIntegrationcode $AutotaskAPIKey.IntegrationCode -credentials $Creds
+	Add-AutotaskBaseURI -BaseURI $AutotaskAPIKey.Url
+	
+	# Verify the Autotask API key works
+	$AutotaskConnected = $true
+	try { 
+		Get-AutotaskAPIResource -Resource Companies -ID 0 -ErrorAction Stop 
+		Write-PSFMessage -Level Verbose -Message "Successfully connected to Autotask."
+	} catch { 
+		$CleanError = ($_ -split "/n")[0]
+		if ($_ -like "*(401) Unauthorized*") {
+			$CleanError = "API Key Unauthorized. ($($CleanError))"
+		}
+		Write-Host $CleanError -ForegroundColor Red
+		Write-PSFMessage -Level Error -Message $CleanError
+		$AutotaskConnected = $false
 	}
 }
 
@@ -159,6 +189,93 @@ if ($SophosJWT) {
 	}
 } else {
 	Write-PSFMessage -Level Error -Message "Failed to connect to: Sophos (No JWT)"
+}
+
+# Authenticate with Ninite
+$NiniteAuthResponse = $false
+if ($Ninite_Login.Email) {
+	# Try to auth with Ninite
+	$attempt = 3
+	while ($attempt -ge 0 -and !$NiniteAuthResponse) {
+		if ($attempt -eq 0) {
+			# Already tried 10x, lets give up
+			Write-PSFMessage -Level Error -Message "Could not authenticate with Ninite. Please verify the credentials and try again."
+		}
+
+		# Get the xsrf token from the form
+		$NiniteSignInPage = Invoke-WebRequest "$($Ninite_Login.BaseURI)signin/" -SessionVariable 'NiniteWebSession'
+		$XSRFToken = ($NiniteSignInPage.InputFields | Where-Object { $_.name -eq "_xsrf" }).value
+
+		if (!$XSRFToken) {
+			Write-Host "Failed to get the XSRF token for Ninite. Retrying..."
+			Start-Sleep -Seconds 2
+			continue
+		}
+
+		if ($XSRFToken) {
+			# Attempt initial login
+			$FormBody = @{
+				email = $Ninite_Login.Email
+				pw = $Ninite_Login.Password
+				"_xsrf" = $XSRFToken
+			}
+
+			try {
+				$NiniteAuthResponse = Invoke-WebRequest "$($Ninite_Login.BaseURI)signin/" -WebSession $NiniteWebSession -Body $FormBody -Method 'POST' -ContentType 'application/x-www-form-urlencoded'
+			} catch {
+				$attempt--
+				Write-Host "Failed to connect to: Ninite"
+				Write-Host "Status Code: $($_.Exception.Response.StatusCode.Value__)"
+				Write-Host "Message: $($_.Exception.Message)"
+				Write-Host "Status Description: $($_.Exception.Response.StatusDescription)"
+				start-sleep (get-random -Minimum 10 -Maximum 100)
+				continue
+			}
+		}
+
+		if ($NiniteAuthResponse.Content -like "*Please enter the current two-factor code*") {
+			if ($Ninite_Login.MFA_Secret -and $Ninite_Login.MFA_Method -eq "totp") {
+				$MFACode = Get-GoogleAuthenticatorPin -Secret $Ninite_Login.MFA_Secret
+				if ($MFACode.'Seconds Remaining' -le 5) {
+					# If the current code is about to expire, lets wait until a new one is ready to be generated to grab the code and try to login
+					Start-Sleep -Seconds ($MFACode.'Seconds Remaining' + 1)
+					$MFACode = Get-GoogleAuthenticatorPin -Secret $Ninite_Login.MFA_Secret
+				}
+
+				$FormBody = @{
+					totp = $MFACode."PIN Code" -replace " ", ""
+					method = "totp"
+					"_xsrf" = $XSRFToken
+				}
+
+				try {
+					$NiniteAuthResponse = Invoke-WebRequest "$($Ninite_Login.BaseURI)me/2fa/challenge" -WebSession $NiniteWebSession -Body $FormBody -Method 'POST' -ContentType 'application/x-www-form-urlencoded'
+				} catch {
+					$attempt--
+					Write-Host "Failed to connect to: Ninite"
+					Write-Host "Status Code: $($_.Exception.Response.StatusCode.Value__)"
+					Write-Host "Message: $($_.Exception.Message)"
+					Write-Host "Status Description: $($_.Exception.Response.StatusDescription)"
+					start-sleep (get-random -Minimum 10 -Maximum 100)
+					continue
+				}
+
+			} elseif (!$Ninite_Login.MFA_Secret) {
+				Write-PSFMessage -Level Error -Message "An MFA secret is required for the Ninite login. Could not authenticate. Please verify the credentials and try again."
+				break
+			} elseif ($Ninite_Login.MFA_Method -ne "totp") {
+				Write-PSFMessage -Level Error -Message "Please setup Ninite with the TOTP MFA type. This script does not support other versions of MFA."
+				break
+			}
+		}
+
+		if (!$NiniteAuthResponse) {
+			$attempt--
+			Write-Host "Failed to connect to: Ninite"
+			start-sleep (get-random -Minimum 10 -Maximum 100)
+			continue
+		}
+	}
 }
 
 # Get all devices from SC
@@ -229,6 +346,49 @@ while ($attempt -ge 0) {
 		Write-PSFMessage -Level Verbose -Message "Successfully got $($SC_Devices_Full.Length) devices from ScreenConnect."
 		break
 	}
+}
+
+# Get org info and devices from Ninite
+$Ninite_Machines = @()
+if ($NiniteAuthResponse) {
+	$NiniteHeader = @{
+		"x-xsrftoken" = $XSRFToken
+		"ninite-role" = 0
+	}
+	$FormBody = @{
+		id = 1
+		jsonrpc = "2.0"
+		method = "get_org_info"
+		params = @{}
+	} | ConvertTo-Json
+
+	$NiniteResponse = Invoke-WebRequest "$($Ninite_Login.BaseURI)remote/rpc_web" -WebSession $NiniteWebSession -Headers $NiniteHeader -Body $FormBody -Method 'POST' -ContentType 'application/json; charset=utf-8'
+	$Ninite_OrgInfo = $NiniteResponse.Content | ConvertFrom-Json
+
+
+	$TotalNiniteDevices = $Ninite_OrgInfo.result.machine_ids.count
+	for ($i = 0; $i -lt [Math]::Ceiling($TotalNiniteDevices / 500); $i++) {
+		$StartIndex = $i * 500
+		$EndIndex = ($i+1) * 500 - 1
+
+		$FormBody = @{
+			id = 1
+			jsonrpc = "2.0"
+			method = "get_machines"
+			params = @{
+				machine_ids = @($Ninite_OrgInfo.result.machine_ids[$StartIndex..$EndIndex])
+			}
+		} | ConvertTo-Json
+
+		$NiniteResponse = Invoke-WebRequest "$($Ninite_Login.BaseURI)remote/rpc_web" -WebSession $NiniteWebSession -Headers $NiniteHeader -Body $FormBody -Method 'POST' -ContentType 'application/json; charset=utf-8'
+		$Ninite_Machines += ($NiniteResponse.Content | ConvertFrom-Json).result
+		Start-Sleep -Seconds 1
+	}
+}
+
+$Ninite_DevicesHash = @{}
+foreach ($Device in $Ninite_Machines) { 
+	$Ninite_DevicesHash[$Device.id] = $Device
 }
 
 #################
@@ -318,8 +478,8 @@ if ($true) {
 	}
 
 	# Function for logging automated changes (installs, deletions, etc.)
-	# $ServiceTarget is 'rmm', 'sc', 'sophos', 'jc', 'itg', or 'autotask'
-	function log_change($Company_Acronym, $ServiceTarget, $RMM_Device_ID, $SC_Device_ID, $Sophos_Device_ID, $JC_Device_ID = $false, $ChangeType, $Hostname = "", $Reason = "") {
+	# $ServiceTarget is 'rmm', 'sc', 'sophos', 'jc', 'ninite', 'itg', or 'autotask'
+	function log_change($Company_Acronym, $ServiceTarget, $RMM_Device_ID, $SC_Device_ID, $Sophos_Device_ID, $JC_Device_ID = $false, $Ninite_Device_ID = $false, $ChangeType, $Hostname = "", $Reason = "") {
 		if (!$LogLocation) {
 			return $false
 		}
@@ -343,6 +503,7 @@ if ($true) {
 			sc_id = $SC_Device_ID
 			sophos_id = $Sophos_Device_ID
 			jc_id = $JC_Device_ID
+			ninite_id = $Ninite_Device_ID
 			service_target = $ServiceTarget
 			change = $ChangeType
 			hostname = $Hostname
@@ -358,7 +519,7 @@ if ($true) {
 	# StartTime is the unixtimestamp to start selection from (inclusive)
 	# EndTime is the unixtimestamp to end selection at (exclusive) (if you set it to 'now' it will automatically calculate the current timestamp)
 	# the remainder are optional and can be used as filters, hostname and reason support wildcards
-	function log_query($LogHistory, $StartTime, $EndTime, $ServiceTarget = "", $RMM_Device_ID = "", $SC_Device_ID = "", $Sophos_Device_ID = "", $ChangeType = "", $Hostname = "", $Reason = "") {
+	function log_query($LogHistory, $StartTime, $EndTime, $ServiceTarget = "", $RMM_Device_ID = "", $SC_Device_ID = "", $Sophos_Device_ID = "", $Ninite_Device_ID = "", $ChangeType = "", $Hostname = "", $Reason = "") {
 		if ($EndTime -eq 'now') {
 			$EndTime = [int](New-TimeSpan -Start (Get-Date "01/01/1970") -End (Get-Date).ToUniversalTime()).TotalSeconds
 		}
@@ -378,6 +539,9 @@ if ($true) {
 		if ($Sophos_Device_ID) {
 			$History_Filtered = $History_Filtered | Where-Object { $Sophos_Device_ID -in $_.sophos_id }
 		}
+		if ($Ninite_Device_ID) {
+			$History_Filtered = $History_Filtered | Where-Object { $Ninite_Device_ID -in $_.ninite_id }
+		}
 		if ($ChangeType) {
 			$History_Filtered = $History_Filtered | Where-Object { $_.change -eq $ChangeType }
 		}
@@ -392,8 +556,8 @@ if ($true) {
 	}
 
 	# Helper function that queries the log based on the filters and returns the count of entries found
-	function log_attempt_count($LogHistory, $ServiceTarget = "", $RMM_Device_ID = "", $SC_Device_ID = "", $Sophos_Device_ID = "", $ChangeType = "", $Hostname = "", $Reason = "") {
-		$History = log_query -LogHistory $LogHistory -StartTime 0 -EndTime 'now' -ServiceTarget $ServiceTarget -RMM_Device_ID $RMM_Device_ID -SC_Device_ID $SC_Device_ID -Sophos_Device_ID $Sophos_Device_ID -ChangeType $ChangeType -Hostname $Hostname -Reason $Reason
+	function log_attempt_count($LogHistory, $ServiceTarget = "", $RMM_Device_ID = "", $SC_Device_ID = "", $Sophos_Device_ID = "", $Ninite_Device_ID = "", $ChangeType = "", $Hostname = "", $Reason = "") {
+		$History = log_query -LogHistory $LogHistory -StartTime 0 -EndTime 'now' -ServiceTarget $ServiceTarget -RMM_Device_ID $RMM_Device_ID -SC_Device_ID $SC_Device_ID -Sophos_Device_ID $Sophos_Device_ID -Ninite_Device_ID $Ninite_Device_ID -ChangeType $ChangeType -Hostname $Hostname -Reason $Reason
 		return ($History | Measure-Object).Count
 	}
 
@@ -405,7 +569,7 @@ if ($true) {
 	}
 
 	# Function for querying repair tickets based on the possible filters
-	# $ServiceTarget is 'rmm', 'sc', or 'sophos'
+	# $ServiceTarget is 'rmm', 'sc', 'sophos', or 'ninite'
 	# $Hostname can be a single hostname or an array of hostnames to check for
 	function repair_tickets($ServiceTarget = "", $Hostname = "") {
 		if ($ServiceTarget -eq 'rmm') {
@@ -414,6 +578,8 @@ if ($true) {
 			$RepairTickets_ByService = $RepairTickets | Where-Object { $_.title -like "SC *" -or $_.title -like "* SC" -or $_.title -like "* SC *" -or $_.title -like "*ScreenConnect*" }
 		} elseif ($ServiceTarget -eq 'sophos') {
 			$RepairTickets_ByService = $RepairTickets | Where-Object { $_.title -like "Sophos *" -or $_.title -like "* Sophos" -or $_.title -like "* Sophos *" }
+		} elseif ($ServiceTarget -eq 'ninite') {
+			$RepairTickets_ByService = $RepairTickets | Where-Object { $_.title -like "Ninite *" -or $_.title -like "* Ninite" -or $_.title -like "* Ninite *" }
 		} else {
 			$RepairTickets_ByService = $RepairTickets
 		}
@@ -436,12 +602,12 @@ if ($true) {
 	# and attempts have been made for the past 2 weeks
 	# If so, an email is sent if one hasn't already been sent in the last 2 weeks, and the email is logged
 	# $ErrorMessage can use HTML and it will become the main body of the email sent
-	function check_failed_attempts($LogHistory, $Company_Acronym, $ErrorMessage, $ServiceTarget, $RMM_Device_ID, $SC_Device_ID, $Sophos_Device_ID, $ChangeType, $Hostname = "", $Reason = "") {
+	function check_failed_attempts($LogHistory, $Company_Acronym, $ErrorMessage, $ServiceTarget, $RMM_Device_ID, $SC_Device_ID, $Sophos_Device_ID, $Ninite_Device_ID, $ChangeType, $Hostname = "", $Reason = "") {
 		$TwoWeeksAgo = [int](New-TimeSpan -Start (Get-Date "01/01/1970") -End (Get-Date).AddDays(-14).ToUniversalTime()).TotalSeconds
 		$TenDays = [int](New-TimeSpan -Start (Get-Date).AddDays(-10).ToUniversalTime() -End (Get-Date).ToUniversalTime()).TotalSeconds
 
 		# first check if a repair ticket already exists for this device/service
-		if ($ServiceTarget -in ("rmm", "sc", "sophos")) {
+		if ($ServiceTarget -in ("rmm", "sc", "sophos", "ninite")) {
 			$RepairTickets_Filtered = repair_tickets -ServiceTarget $ServiceTarget -Hostname $Hostname
 			if (($RepairTickets_Filtered | Measure-Object).count -gt 0) {
 				break;
@@ -475,6 +641,9 @@ if ($true) {
 		} elseif ($ServiceTarget -eq 'sophos') {
 			$ID_Params."Sophos_Device_ID" = $Sophos_Device_ID
 			$EmailLink = "https://cloud.sophos.com/manage/devices/computers/$($Sophos_Device_ID)"
+		} elseif ($ServiceTarget -eq 'ninite') {
+			$ID_Params."Ninite_Device_ID" = $Ninite_Device_ID
+			$EmailLink = ""
 		}
 
 		$EmailQuery_Params = @{
@@ -641,6 +810,36 @@ if ($true) {
 		return
 	}
 
+	function compare_activity_ninite($DeviceIDs) {
+		if (!$Ninite_DevicesHash) {
+			return @()
+		}
+
+		$NiniteDevices = @()
+		foreach ($DeviceID in $DeviceIDs) {
+			$NiniteDevices += $Ninite_DevicesHash[$DeviceID]
+		}
+		$DevicesOutput = @()
+
+		foreach ($Device in $NiniteDevices) {
+			$DeviceOutputObj = [PsCustomObject]@{
+				type = "ninite"
+				id = $Device.id
+				last_active = $null
+			}
+
+			if ($Device.last_seen -and [string]$Device.last_seen -as [DateTime]) {
+				$DeviceOutputObj.last_active = [DateTime]$Device.last_seen
+				$DevicesOutput += $DeviceOutputObj
+			}
+		}
+
+		$DevicesOutput = $DevicesOutput | Sort-Object last_active -Desc
+
+		$DevicesOutput
+		return
+	}
+
 	function compare_activity_jc($DeviceIDs) {
 		if (!$JC_DevicesHash) {
 			return @()
@@ -731,7 +930,7 @@ if ($true) {
 		return
 	}
 
-	# Helper function that takes a $MatchedDevices object and returns the activity comparison for SC, RMM, Sophos, and (if applicable) Azure & Intune
+	# Helper function that takes a $MatchedDevices object and returns the activity comparison for SC, RMM, Sophos, and (if applicable) Azure, Intune, JC &/or Ninite
 	function compare_activity($MatchedDevice) {
 		$Activity = @{}
 
@@ -748,6 +947,11 @@ if ($true) {
 		if ($MatchedDevice.sophos_matches -and $MatchedDevice.sophos_matches.count -gt 0) {
 			$SophosActivity = compare_activity_sophos $MatchedDevice.sophos_matches
 			$Activity.sophos = $SophosActivity | Sort-Object last_active -Descending | Select-Object -First 1
+		}
+
+		if ($NiniteAuthResponse -and $MatchedDevice.ninite_matches -and $MatchedDevice.ninite_matches.count -gt 0) {
+			$NiniteActivity = compare_activity_ninite $MatchedDevice.ninite_matches
+			$Activity.ninite = $NiniteActivity | Sort-Object last_active -Descending | Select-Object -First 1
 		}
 
 		if ($JCConnected -and $MatchedDevice.jc_matches -and $MatchedDevice.jc_matches.count -gt 0) {
@@ -771,7 +975,7 @@ if ($true) {
 
 	# Adds a device to the install queue json file (creates the file if need be)
 	# Either set $SC_ID or $RMM_ID, this is the device used for the install
-	# Set $ToInstall to what needs to be installed ("sc", or "rmm")
+	# Set $ToInstall to what needs to be installed ("sc", "rmm", or "ninite")
 	function add_device_to_install_queue($SC_ID = $false, $RMM_ID = $false, $ToInstall = $false) {
 		$FromDeviceType = $false
 		if ($SC_ID) {
@@ -820,7 +1024,7 @@ if ($true) {
 
 	# Removes a device from the install queue json file
 	# Either set $SC_ID or $RMM_ID, this is the device used for the install
-	# Set $ToInstall to what needed to be installed ("sc" or "rmm"), if left $false will remove for all $ToInstall types
+	# Set $ToInstall to what needed to be installed ("sc", "rmm", or "ninite"), if left $false will remove for all $ToInstall types
 	function remove_device_from_install_queue($SC_ID = $false, $RMM_ID = $false, $ToInstall = $false) {
 		$FromDeviceType = $false
 		if ($SC_ID) {
@@ -866,13 +1070,15 @@ if ($true) {
 
 	# Helper function that checks a device from the $MatchedDevices array against the $Ignore_Installs config value and returns true if it should be ignored
 	# Also ignores Sophos on Hyper-V hosts via a regex check
-	# $System should be 'sc', 'rmm', or 'sophos'
+	# $System should be 'sc', 'rmm', 'sophos', or 'ninite'
 	function ignore_install($Device, $System) {
 		if ($System -eq 'sc' -and $Ignore_Installs.SC -eq $true) {
 			return $true
 		} elseif ($System -eq 'rmm' -and $Ignore_Installs.RMM -eq $true) {
 			return $true
 		} elseif ($System -eq 'sophos' -and $Ignore_Installs.Sophos -eq $true) {
+			return $true
+		} elseif ($System -eq 'ninite' -and $Ignore_Installs.Ninite -eq $true) {
 			return $true
 		}
 
@@ -887,6 +1093,8 @@ if ($true) {
 			$IgnoredDevices = $Ignore_Installs.RMM
 		} elseif ($System -eq 'sophos') {
 			$IgnoredDevices = $Ignore_Installs.Sophos
+		} elseif ($System -eq 'ninite') {
+			$IgnoredDevices = $Ignore_Installs.Ninite
 		}
 
 		if ($IgnoredDevices) {
@@ -895,6 +1103,8 @@ if ($true) {
 			} elseif ($System -eq 'rmm' -and ($IgnoredDevices | Where-Object { $_ -in $Device.sc_hostname -or $_ -in $Device.sc_matches -or $_ -in $Device.sophos_hostname -or $_ -in $Device.sophos_matches } | Measure-Object).Count -gt 0) {
 				return $true
 			} elseif ($System -eq 'sophos' -and ($IgnoredDevices | Where-Object { $_ -in $Device.sc_hostname -or $_ -in $Device.sc_matches -or $_ -in $Device.rmm_hostname -or $_ -in $Device.rmm_matches  } | Measure-Object).Count -gt 0) {
+				return $true
+			} elseif ($System -eq 'ninite' -and ($IgnoredDevices | Where-Object { $_ -in $Device.sc_hostname -or $_ -in $Device.sc_matches -or $_ -in $Device.rmm_hostname -or $_ -in $Device.rmm_matches -or $_ -in $Device.sophos_hostname -or $_ -in $Device.sophos_matches } | Measure-Object).Count -gt 0) {
 				return $true
 			}
 		} else {
@@ -954,6 +1164,29 @@ if ($true) {
 		} else {
 			Write-Warning "Could not delete device '$($JC_ID)' from JumpCloud."
 			return $false
+		}
+	}
+
+	# Deletes a device from Ninite
+	function delete_from_ninite($Ninite_ID, $NiniteWebSession, $NiniteHeader) {
+		$FormBody = @{
+			id = 1
+			jsonrpc = "2.0"
+			method = "delete_machine"
+			params = @{
+				machine_id = $Ninite_ID
+			}
+		} | ConvertTo-Json
+	
+		try {
+			$NiniteResponse = Invoke-WebRequest "$($Ninite_Login.BaseURI)remote/rpc_web" -WebSession $NiniteWebSession -Headers $NiniteHeader -Body $FormBody -Method 'POST' -ContentType 'application/json; charset=utf-8'
+		} catch {
+			Write-Warning "Could not delete device '$($Ninite_ID)' from Ninite."
+			return $false
+		}
+		$DeleteResponse = $NiniteResponse.Content | ConvertFrom-Json
+		if ($DeleteResponse -and $null -eq $DeleteResponse.result) {
+			return $true
 		}
 	}
 
@@ -1213,6 +1446,31 @@ if ($true) {
 		}
 		return $false
 	}
+
+	function install_ninite_using_rmm($RMM_Device) {
+		if (is_existing_rmm_job_active -RMM_Device $RMM_Device -JobType "install_ninite") {
+			return $false
+		}
+
+		if ($RMM_Device."Operating System" -like "*Windows*" -and $RMM_Device."Device Type" -notlike "*Server*") {
+			$Job = Set-DrmmDeviceQuickJob -DeviceUid $RMM_Device."Device UID" -jobName "Install Ninite on $($RMM_Device."Device Hostname")" -ComponentName "Ninite Agent Installer [WIN]"
+			if ($Job -and $Job.job -and $Job.job.uid) {
+				$Removed = remove_device_from_install_queue -RMM_ID $RMM_Device."Device UID" -ToInstall "ninite"
+				log_recent_rmm_job -RMM_Device $RMM_Device -JobType "install_ninite" -JobID $Job.job.uid
+				return $true
+			}
+		}
+		return $false
+	}
+}
+
+# Add a last seen field to Ninite devices
+foreach ($Machine in $Ninite_Machines) {
+	# Parse the last seen and add a field for it
+	if (!$Machine.last_seen) {
+		$Machine | Add-Member -NotePropertyName "last_seen" -NotePropertyValue $false
+	}
+	$Machine.last_seen = if ($Machine.connected) { Get-Date } elseif ($Machine.last_disconnect) { Convert-UTCtoLocal $UnixDateLowLimit.AddSeconds($Machine.last_disconnect) } else { $false }
 }
 
 ### This code is unique for each company, lets loop through each company and run this code on each
@@ -1251,10 +1509,11 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 		$AzureToken = ConvertTo-SecureString -String $conn.access_token -AsPlainText -Force
 		$MgGraphConnect = Connect-MgGraph -AccessToken $AzureToken
-		if ($MgGraphConnect -eq "Welcome To Microsoft Graph!") {
+		if ($MgGraphConnect -like "Welcome To Microsoft Graph!*") {
 			$AzureConnected = $true
 		}
 	}
+	$AzureConnected = $false # Disable for now until fixed
 
 	############
 	# Connect to the Sophos API to get the device list from Sophos
@@ -1611,13 +1870,14 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	# Cleanup
 	##############
 
-	# Get a list of Autotask tickets related to RMM, SC, or Sophos agent issues
-	$RepairTickets = Get-AutotaskAPIResource -Resource Tickets -SearchQuery '{"filter":[{"op":"noteq","field":"Status","value":5},{"op":"or","items": [{"op":"contains","field":"title","value":"RMM"},{"op":"contains","field":"title","value":"SC"},{"op":"contains","field":"title","value":"ScreenConnect"},{"op":"contains","field":"title","value":"Sophos"}]}]}'
+	# Get a list of Autotask tickets related to RMM, SC, Sophos or Ninite agent issues
+	$RepairTickets = Get-AutotaskAPIResource -Resource Tickets -SearchQuery '{"filter":[{"op":"noteq","field":"Status","value":5},{"op":"or","items": [{"op":"contains","field":"title","value":"RMM"},{"op":"contains","field":"title","value":"SC"},{"op":"contains","field":"title","value":"ScreenConnect"},{"op":"contains","field":"title","value":"Sophos"},{"op":"contains","field":"title","value":"Ninite"}]}]}'
 	$RepairTickets = $RepairTickets | Where-Object {
 		$_.title -like "*Reinstall RMM*" -or $_.title -like "*Install RMM*" -or $_.title -like"*Audit RMM*" -or $_.title -like "*Troubleshoot RMM*" -or $_.title -like "*Repair RMM*" -or
 		$_.title -like "*Reinstall SC*" -or $_.title -like "*Install SC*" -or $_.title -like"*Audit SC*" -or $_.title -like "*Troubleshoot SC*" -or $_.title -like "*Repair SC*" -or
 		$_.title -like "*Reinstall ScreenConnect*" -or $_.title -like "*Install ScreenConnect*" -or $_.title -like"*Audit ScreenConnect*" -or $_.title -like "*Troubleshoot ScreenConnect*" -or $_.title -like "*Repair ScreenConnect*" -or
-		$_.title -like "*Reinstall Sophos*" -or $_.title -like "*Install Sophos*" -or $_.title -like"*Audit Sophos*" -or $_.title -like "*Troubleshoot Sophos*" -or $_.title -like "*Repair Sophos*"
+		$_.title -like "*Reinstall Sophos*" -or $_.title -like "*Install Sophos*" -or $_.title -like"*Audit Sophos*" -or $_.title -like "*Troubleshoot Sophos*" -or $_.title -like "*Repair Sophos*" -or
+		$_.title -like "*Reinstall Ninite*" -or $_.title -like "*Install Ninite*" -or $_.title -like"*Audit Ninite*" -or $_.title -like "*Troubleshoot Ninite*" -or $_.title -like "*Repair Ninite*"
 	}
 
 	# Get the existing log
@@ -1645,7 +1905,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		Write-Host "Searching for duplicates..."
 		$Duplicates = @()
 		foreach ($Device in $MatchedDevices) {
-			if ($Device.sc_matches.count -gt 1 -or $Device.rmm_matches.count -gt 1 <# -or $Device.sophos_matches.count -gt 1 #> -or ($JCConnected -and $Device.jc_matches.count -gt 1)) { 
+			if ($Device.sc_matches.count -gt 1 -or $Device.rmm_matches.count -gt 1 <# -or $Device.sophos_matches.count -gt 1 #> -or ($JCConnected -and $Device.jc_matches.count -gt 1) -or ($NiniteAuthResponse -and $Device.ninite_matches.count -gt 1)) { 
 				$Duplicates += $Device
 			}
 		}
@@ -1768,6 +2028,44 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						$i++
 					}
 				}
+
+				# Ninite
+				if ($NiniteAuthResponse -and $Device.ninite_matches.count -gt 1) {
+					$OrderedDevices = compare_activity_ninite($Device.ninite_matches)
+					$i = 0
+					foreach ($OrderedDevice in $OrderedDevices) {
+						$NiniteDevice = $Ninite_DevicesHash[$OrderedDevice.id]
+						$Deleted = $false
+						$AllowDeletion = $true
+						if ($DontAutoDelete -and (
+							($NiniteDevice.name -and $DontAutoDelete.Hostnames -contains $NiniteDevice.name) -or 
+							($NiniteDevice.name2 -and $DontAutoDelete.Hostnames -contains $NiniteDevice.name2) -or
+							($NiniteDevice.machine_name -and $DontAutoDelete.Hostnames -contains $NiniteDevice.machine_name) -or  
+							($NiniteDevice.name -and $DontAutoDelete.Ninite -contains $NiniteDevice.name) -or 
+							($NiniteDevice.name2 -and $DontAutoDelete.Ninite -contains $NiniteDevice.name2) -or
+							($NiniteDevice.machine_name -and $DontAutoDelete.Ninite -contains $NiniteDevice.machine_name) -or  
+							$DontAutoDelete.Ninite -contains $OrderedDevice.id
+						)) {
+							$AllowDeletion = $false
+						}
+						$Hostname = if ($NiniteDevice.name) { $NiniteDevice.name } elseif ($NiniteDevice.name2) { $NiniteDevice.name } else { $NiniteDevice.machine_name }
+						if ($i -gt 0 -and !$ReadOnly -and $AllowDeletion) {
+							$Deleted = delete_from_ninite -Ninite_ID $OrderedDevice.id  -NiniteWebSession $NiniteWebSession -NiniteHeader $NiniteHeader
+							if ($Deleted) {
+								log_change -Company_Acronym $Company_Acronym -ServiceTarget "ninite" -RMM_Device_ID $Device.rmm_matches -SC_Device_ID $OrderedDevice.id -Sophos_Device_ID $Device.sophos_matches -Ninite_Device_ID $Device.ninite_matches -ChangeType "delete" -Hostname $Hostname -Reason "Duplicate"
+							}
+						}
+						$DuplicatesTable += [PsCustomObject]@{
+							type = "Ninite"
+							hostname = $Hostname
+							id = $OrderedDevice.id 
+							last_active = $OrderedDevice.last_active
+							remove = if ($i -eq 0) { "No" } else { "Yes" }
+							auto_deleted = $Deleted
+						}
+						$i++
+					}
+				}
 			}
 
 			Write-Host "Warning! Duplicates were found!" -ForegroundColor Red
@@ -1833,6 +2131,21 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					foreach ($MDevice in $MatchedDevice) {
 						$MDevice.jc_matches = $MatchedDevice.jc_matches | Where-Object { $_ -ne $Device.id }
 						$MDevice.jc_hostname = @($JCDevices | Foreach-Object { if ($_.hostname) { $_.hostname } else { $_.displayName } })
+					}
+					if (($MatchedDevice | Measure-Object).Count -gt 0) {
+						$UpdatedMatchedDevices = $true
+					}
+				}
+
+				if ($Device.type -eq "Ninite") {
+					$MatchedDevice = $MatchedDevices | Where-Object { $Device.id -in $_.ninite_matches }
+					$NiniteDevices = @()
+					foreach ($DeviceID in $MatchedDevice.ninite_matches) {
+						$NiniteDevices += $Ninite_DevicesHash[$DeviceID]
+					}
+					foreach ($MDevice in $MatchedDevice) {
+						$MDevice.ninite_matches = $MatchedDevice.ninite_matches | Where-Object { $_ -ne $Device.id }
+						$MDevice.ninite_hostname = @($NiniteDevices | Foreach-Object { if ($_.name) { $_.name } else { $_.machine_name } })
 					}
 					if (($MatchedDevice | Measure-Object).Count -gt 0) {
 						$UpdatedMatchedDevices = $true
@@ -1970,6 +2283,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 			# This device does not look like it belongs here, lets flag it
 			$MoveDevices += [PsCustomObject]@{
+				ID = $Device.id
 				Hostnames = $Hostnames -join ', '
 				DeviceType = $DeviceType
 				InSC = if ($SCDeviceIDs) { "Yes" } else { "No" }
@@ -2057,6 +2371,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		Write-Host "Searching for broken connections..."
 		$BrokenConnections = @()
 		$SendEmail = $false
+		$Now = Get-Date
 		foreach ($Device in $MatchedDevices) {
 			$ActivityComparison = $Device.activity_comparison
 			$Activity = $ActivityComparison.Values | Sort-Object last_active
@@ -2086,6 +2401,12 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						} elseif ($DeviceType -eq 'intune') {
 							$InTuneDevice = $InTune_DevicesHash[$DeviceID]
 							$Hostname = $InTuneDevice.DeviceName
+						} elseif ($DeviceType -eq 'jc') {
+							$JCDevice = $JC_DevicesHash[$DeviceID]
+							$Hostname = $JCDevice.displayName
+						} elseif ($DeviceType -eq 'ninite') {
+							$NiniteDevice = $Ninite_DevicesHash[$DeviceID]
+							$Hostname = $NiniteDevice.name
 						}
 
 						$Link = ''
@@ -2189,17 +2510,56 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 								}
 							}
 						}
+
+						if (!$ReadOnly -and $DeviceType -eq 'ninite' -and $RMM_ID -and ($Device.rmm_matches | Measure-Object).Count -gt 0 -and $Device.id -notin $MoveDevices.ID) {
+							# Device broken in ninite but is in RMM and we are using the rmm api, and this device is not in the $MoveDevices array (devices that look like they dont belong)
+							$RMM_Device = @()
+							foreach ($DeviceID in $Device.rmm_matches) {
+								$RMM_Device += $RMM_DevicesHash[$DeviceID]
+							}
+	
+							# Only continue if the device was seen in RMM in the last 24 hours
+							foreach ($RMMDevice in $RMM_Device) {
+								if ($RMMDevice.suspended -ne "True" -and $RMMDevice."Operating System" -like "*Windows*" -and $RMMDevice."Device Type" -notlike "*Server*") {
+									if ($RMMDevice.Status -eq "Online" -or $RMMDevice."Last Seen" -eq "Currently Online" -or ($RMMDevice."Last Seen" -as [DateTime]) -gt (Get-Date).AddHours(-24)) {
+										$LogParams = @{
+											ServiceTarget = "rmm"
+											RMM_Device_ID = $RMMDevice."Device UID"
+											ChangeType = "install_ninite"
+											Hostname = $RMMDevice."Device Hostname"
+										}
+										$AttemptCount = log_attempt_count @LogParams -LogHistory $LogHistory
+
+										if (install_ninite_using_rmm -RMM_Device $RMMDevice) {
+											$AttemptCount = log_attempt_count @LogParams -LogHistory $LogHistory
+											$EmailError = "Ninite is broken on $($LogParams.Hostname). The Device Audit script has tried to reinstall Ninite via RMM $AttemptCount times now but it has not succeeded."
+											$LogParams.SC_Device_ID = $Device.sc_matches
+											$LogParams.Sophos_Device_ID = $Device.sophos_matches
+											$LogParams.Ninite_Device_ID = $Device.ninite_matches
+											$LogParams.Reason = "Ninite connection broken"
+		
+											$AutoFix = $true
+											check_failed_attempts @LogParams -LogHistory $LogHistory -Company_Acronym $Company_Acronym -ErrorMessage $EmailError
+											log_change @LogParams -Company_Acronym $Company_Acronym
+										}
+									} else {
+										add_device_to_install_queue -RMM_ID $RMMDevice."Device UID" -ToInstall 'ninite'
+									}
+								}
+							}
+						}
 						
 						$RepairTickets_Subset = @()
-						if ($DeviceType -in @("rmm", "sc", "sophos")) {
+						if ($DeviceType -in @("rmm", "sc", "sophos", "ninite")) {
 							$RepairTickets_Subset = repair_tickets -ServiceTarget $DeviceType -Hostname $Hostname
 						}
 
-						if (!$AutoFix -and $Device.id -notin $MoveDevices.ID -and $Timespan.Days -le 7 -and ($RepairTickets_Subset | Measure-Object).Count -eq 0) {
+						$MostRecentTimespan = New-TimeSpan -Start $NewestDate -End $Now
+						if (!$AutoFix -and $Device.id -notin $MoveDevices.ID -and $MostRecentTimespan.Days -le 7 -and ($RepairTickets_Subset | Measure-Object).Count -eq 0) {
 							$SendEmail = $true
 						}
 
-						$BrokenConnections += [PsCustomObject]@{
+						$BrokenConnection = [PsCustomObject]@{
 							BrokenType = $DeviceType
 							Hostname = $Hostname
 							LastActive = $Activity[$i].last_active
@@ -2207,9 +2567,48 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 							SC_Time = if ($ActivityComparison.sc) { $ActivityComparison.sc[0].last_active } else { "NA" }
 							RMM_Time = if ($ActivityComparison.rmm) { $ActivityComparison.rmm[0].last_active } else { "NA" }
 							Sophos_Time = if ($ActivityComparison.sophos) { $ActivityComparison.sophos[0].last_active } else { "NA" }
-							RepairTicket = if (($RepairTickets_Subset | Measure-Object).Count -gt 0) { $RepairTickets_Subset.ticketNumber -join ", " } else { "NA" }
-							Link = $Link
 						}
+
+						if ($AzureConnected) {
+							if (!$BrokenConnection.Azure_Time) {
+								$BrokenConnection | Add-Member -NotePropertyName Azure_Time -NotePropertyValue "NA"
+							}
+							if (!$BrokenConnection.Intune_Time) {
+								$BrokenConnection | Add-Member -NotePropertyName Intune_Time -NotePropertyValue "NA"
+							}
+							if ($ActivityComparison.azure) {
+								$BrokenConnection.Azure_Time = $ActivityComparison.azure[0].last_active
+							}
+							if ($ActivityComparison.intune) {
+								$BrokenConnection.Intune_Time = $ActivityComparison.intune[0].last_active
+							}
+						}
+						if ($JCConnected) {
+							if (!$BrokenConnection.JC_Time) {
+								$BrokenConnection | Add-Member -NotePropertyName JC_Time -NotePropertyValue "NA"
+							}
+							if ($ActivityComparison.jc) {
+								$BrokenConnection.JC_Time = $ActivityComparison.jc[0].last_active
+							}
+						}
+						if ($Ninite_Machines) {
+							if (!$BrokenConnection.Ninite_Time) {
+								$BrokenConnection | Add-Member -NotePropertyName Ninite_Time -NotePropertyValue "NA"
+							}
+							if ($ActivityComparison.ninite) {
+								$BrokenConnection.Ninite_Time = $ActivityComparison.ninite[0].last_active
+							}
+						}
+
+						if (!$BrokenConnection.RepairTicket) {
+							$BrokenConnection | Add-Member -NotePropertyName RepairTicket -NotePropertyValue "NA"
+						}
+						if (!$BrokenConnection.Link) {
+							$BrokenConnection | Add-Member -NotePropertyName Link -NotePropertyValue ""
+						}
+						$BrokenConnection.RepairTicket = if (($RepairTickets_Subset | Measure-Object).Count -gt 0) { $RepairTickets_Subset.ticketNumber -join ", " }
+						$BrokenConnection.Link = $Link
+						$BrokenConnections += $BrokenConnection
 					}
 				}
 			}
@@ -2280,6 +2679,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			$SCDeviceIDs = @($Device.sc_matches)
 			$RMMDeviceIDs = @($Device.rmm_matches)
 			$SophosDeviceIDs = @($Device.sophos_matches)
+			$NiniteDeviceIDs = @($Device.ninite_matches)
 
 			$ActivityComparison = $Device.activity_comparison
 			$Activity = $ActivityComparison.Values | Sort-Object last_active
@@ -2291,7 +2691,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				continue
 			}
 		
-			if (($SCDeviceIDs | Measure-Object).count -eq 0 -or ($RMMDeviceIDs | Measure-Object).count -eq 0 -or ($SophosDeviceIDs | Measure-Object).count -eq 0) {
+			if (($SCDeviceIDs | Measure-Object).count -eq 0 -or ($RMMDeviceIDs | Measure-Object).count -eq 0 -or ($SophosDeviceIDs | Measure-Object).count -eq 0 -or ($NiniteDeviceIDs | Measure-Object).count -eq 0) {
 				$MissingTypes = @()
 
 				if (($SCDeviceIDs | Measure-Object).count -eq 0 -and !(ignore_install -Device $Device -System 'sc')) {
@@ -2303,6 +2703,9 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				if (($SophosDeviceIDs | Measure-Object).count -eq 0 -and !(ignore_install -Device $Device -System 'sophos')) {
 					$MissingTypes += 'sophos'
 				}
+				if (($NiniteDeviceIDs | Measure-Object).count -eq 0 -and !(ignore_install -Device $Device -System 'ninite')) {
+					$MissingTypes += 'ninite'
+				}
 
 				if ($MissingTypes -contains 'sc' -and $MissingTypes -contains 'rmm' -and $MissingTypes -notcontains 'sophos' -and $Timespan.Days -gt 7) {
 					# If this device is only in Sophos and hasn't been seen in the past week, lets just skip it.
@@ -2313,6 +2716,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				if (($MissingTypes | Measure-Object).count -gt 0) {
 					$Hostnames = @()
 					$DeviceType = $false
+					$OS = $false
 					
 					if ($SCDeviceIDs) {
 						$SCDevices = @()
@@ -2321,6 +2725,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						}
 						$Hostnames += $SCDevices.Name
 						$DeviceType = $SCDevices[0].DeviceType
+						$OS = $SCDevices[0].GuestOperatingSystemName
 					}
 					if ($RMMDeviceIDs) {
 						$RMMDevices = @()
@@ -2330,6 +2735,9 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						$Hostnames += $RMMDevices."Device Hostname"
 						if ($DeviceType) {
 							$DeviceType = $RMMDevices[0]."Device Type"
+						}
+						if (!$OS) {
+							$OS = $RMMDevices[0]."Operating System"
 						}
 					}
 					if ($SophosDeviceIDs) {
@@ -2341,8 +2749,29 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						if (!$DeviceType) {
 							$DeviceType = $SophosDevices[0].type
 						}
+						if (!$OS) {
+							$OS = $SophosDevices[0].OS
+						}
+					}
+					if ($NiniteDeviceIDs) {
+						$NiniteDevices = @()
+						foreach ($DeviceID in $NiniteDeviceIDs) {
+							$NiniteDevices += $Ninite_DevicesHash[$DeviceID]
+						}						
+						$Hostnames += $NiniteDevices.name
+						if (!$DeviceType) {
+							$DeviceType = if ($NiniteDevices[0].win_type -like "Server" -or $NiniteDevices[0].win_type -like "DomainController") {"Server"} else {"Workstation"}
+						}
 					}
 					$Hostnames = $HostNames | Sort-Object -Unique
+
+					# Don't mark Ninite as missing if this device isn't on Windows
+					if ($MissingTypes -contains "ninite" -and $OS -notlike "*Windows*") {
+						$MissingTypes = $MissingTypes | Where-Object {$_ -ne "ninite"}
+					}
+					if (!$MissingTypes) {
+						continue
+					}
 
 					$SCLink = ""
 					$RMMLink = ""
@@ -2433,9 +2862,42 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						}
 					}
 
+					if (!$ReadOnly -and $MissingTypes -contains 'ninite' -and $MissingTypes -notcontains 'rmm' -and $RMM_ID -and $Device.id -notin $MoveDevices.ID) {
+						# Device missing in ninite but is in RMM and we are using the rmm api, and this device is not in the $MoveDevices array (devices that look like they dont belong)`
+						# Only continue if the device was seen in RMM in the last 24 hours
+						foreach ($RMMDevice in $RMMDevices) {
+							if ($RMMDevice.suspended -ne "True" -and $RMMDevice."Operating System" -like "*Windows*" -and $RMMDevice."Device Type" -notlike "*Server*") {
+								if ($RMMDevice.Status -eq "Online" -or $RMMDevice."Last Seen" -eq "Currently Online" -or ($RMMDevice."Last Seen" -as [DateTime]) -gt (Get-Date).AddHours(-24)) {
+									$LogParams = @{
+										ServiceTarget = "rmm"
+										RMM_Device_ID = $RMMDevice."Device UID"
+										ChangeType = "install_ninite"
+										Hostname = $RMMDevice."Device Hostname"
+									}
+									$AttemptCount = log_attempt_count @LogParams -LogHistory $LogHistory
+
+									if (install_ninite_using_rmm -RMM_Device $RMMDevice) {
+										$AttemptCount = log_attempt_count @LogParams -LogHistory $LogHistory
+										$EmailError = "Ninite is not installed on $($LogParams.Hostname). The Device Audit script has tried to install Ninite via RMM $AttemptCount times now but it has not succeeded."
+										$LogParams.SC_Device_ID = $SCDeviceIDs
+										$LogParams.Sophos_Device_ID = $SophosDeviceIDs
+										$LogParams.Ninite_Device_ID = $NiniteDeviceIDs
+										$LogParams.Reason = "Ninite not installed"
+	
+										$AutoFix = $true
+										check_failed_attempts @LogParams -LogHistory $LogHistory -Company_Acronym $Company_Acronym -ErrorMessage $EmailError
+										log_change @LogParams -Company_Acronym $Company_Acronym
+									}
+								} else {
+									add_device_to_install_queue -RMM_ID $RMMDevice."Device UID" -ToInstall 'ninite'
+								}
+							}
+						}
+					}
+
 					$RepairTickets_Subset = @()
 					$MissingTypes | ForEach-Object {
-						if ($_ -in @("rmm", "sc", "sophos")) {
+						if ($_ -in @("rmm", "sc", "sophos", "ninite")) {
 							$RepairTickets_Subset += repair_tickets -ServiceTarget $_ -Hostname $Hostnames
 						}
 					}					
@@ -2451,6 +2913,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						InSC = if ($SCDeviceIDs) { "Yes" } elseif (ignore_install -Device $Device -System 'sc') { "Ignore" } else { "No" }
 						InRMM = if ($RMMDeviceIDs) { "Yes" }  elseif (ignore_install -Device $Device -System 'rmm') { "Ignore" } else { "No" }
 						InSophos = if ($SophosDeviceIDs) { "Yes" } elseif ($RMMAntivirus -and $RMMAntivirus -like "Sophos*") { "Yes, missing from portal" } elseif (ignore_install -Device $Device -System 'sophos') { "Ignore" } else { "No" }
+						InNinite = if ($NiniteDeviceIDs) { "Yes" } elseif (ignore_install -Device $Device -System 'ninite') { "Ignore" } else { "No" }
 						AutoFix_Attempted = $AutoFix
 						RepairTicket = if (($RepairTickets_Subset | Measure-Object).Count -gt 0) { $RepairTickets_Subset.ticketNumber -join ", " } else { "NA" }
 						SC_Link = $SCLink
@@ -2462,7 +2925,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		}
 
 		if ($SendEmail) {
-			Write-Host "Warning! Devices were found that are missing in 1 or more systems (RMM, SC, or Sophos)." -ForegroundColor Red
+			Write-Host "Warning! Devices were found that are missing in 1 or more systems (RMM, SC, Sophos, or Ninite)." -ForegroundColor Red
 			
 			# Try sending an email
 			$TwoWeeksAgo = [int](New-TimeSpan -Start (Get-Date "01/01/1970") -End (Get-Date).AddDays(-14).ToUniversalTime()).TotalSeconds
@@ -2483,7 +2946,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			if (($History_Subset_Emails | Measure-Object).count -eq 0) {
 				# send an email
 				$EmailSubject = "Device Audit on $Company_Acronym - Devices Found that are missing a connection"
-				$EmailIntro = "Devices were found that are missing in 1 or more systems (RMM, SC, or Sophos). Auto-fixes have been attempted where possible. Please review:"
+				$EmailIntro = "Devices were found that are missing in 1 or more systems (RMM, SC, Sophos, or Ninite). Auto-fixes have been attempted where possible. Please review:"
 				$DeviceTable = @($MissingConnections) | Where-Object { $_.LastActive -gt (Get-Date (Get-Date).AddDays(-7)) } | ConvertTo-HTML -Fragment -As Table | Out-String
 
 				$HTMLEmail = $EmailTemplate -f `
@@ -2524,6 +2987,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		Write-Host "Searching for old inactive devices..."
 		$InactiveDevices = @()
 		$Now = Get-Date
+
 		foreach ($Device in $MatchedDevices) {
 			$ActivityComparison = $Device.activity_comparison
 			$Activity = $ActivityComparison.Values | Sort-Object last_active
@@ -2546,6 +3010,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					$JCDeviceID = $false
 					if ($JCConnected) {
 						$JCDeviceID = if ($ActivityComparison.jc) { $ActivityComparison.jc[0].id } else { $false }
+					}
+					$NiniteDeviceID = $false
+					if ($Ninite_Machines) {
+						$NiniteDeviceID = if ($ActivityComparison.ninite) { $ActivityComparison.ninite[0].id } else { $false }
 					}
 					$ITG_IDs = $Device.itg_matches
 
@@ -2597,6 +3065,17 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 							$OperatingSystem = "$($JCDevice.os) $($JCDevice.version)"
 						}
 					}
+					if ($NiniteDeviceID) {
+						$NiniteDevice = $Ninite_DevicesHash[$NiniteDeviceID]
+						$Hostnames += if ($NiniteDevice.name) { $NiniteDevice.name }
+						$Hostnames += if ($NiniteDevice.machine_name) { $NiniteDevice.machine_name }
+						if (!$User -and $NiniteDevice.last_user) {
+							$User = $NiniteDevice.last_user
+						}
+						if (!$OperatingSystem -and $NiniteDevice.win_product_name) {
+							$OperatingSystem = $NiniteDevice.win_product_name
+						}
+					}
 					$Hostnames = $HostNames | Sort-Object -Unique
 
 					$SCLink = ''
@@ -2622,6 +3101,22 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					$RMMAntivirus = $false
 					if (!$SophosDeviceID -and $RMMDeviceID) {
 						$RMMAntivirus = $RMMDevice.Antivirus
+					} elseif (!$SophosDeviceID -and $NiniteDeviceID) {
+						$NiniteAV = $NiniteDevice.anti_virus
+						if ($NiniteAV.Count -gt 0) {
+							$NiniteAV = $NiniteAV | Where-Object { ($([Convert]::ToString($($_.productState), 16)).PadLeft(6,"0")).Substring(2,1) -eq 1 }
+						}
+						if ($NiniteAV.Count -gt 0 -and ($NiniteAV.onAccessScanningEnabled -contains $true)) {
+							$NiniteAV = $NiniteAV | Where-Object { $_.onAccessScanningEnabled -eq $true }
+						}
+						if ($NiniteAV.Count -gt 0 -and ($NiniteAV.displayName -like "*Sophos Intercept*")) {
+							$NiniteAV = $NiniteAV | Where-Object { $_.displayName -like "*Sophos Intercept*" }
+						}
+						if ($NiniteAV.Count -gt 0 -and ($NiniteAV.displayName -like "*Sophos*")) {
+							$NiniteAV = $NiniteAV | Where-Object { $_.displayName -like "*Sophos*" }
+						}
+						$NiniteAV = $NiniteAV | Select-Object -First 1
+						$RMMAntivirus = $NiniteAV.displayName
 					}
 
 					$DeleteSC = "No"
@@ -2689,6 +3184,31 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						}
 					}
 
+					$DeleteNinite = "No"
+					if ($NiniteDeviceID -and !$RMMOnly) {
+						$DeleteNinite = "Yes, manually delete"
+						$AllowDeletion = $true
+						if ($DontAutoDelete -and (
+							($NiniteDevice.name -and $DontAutoDelete.Hostnames -contains $NiniteDevice.name) -or 
+							($NiniteDevice.name2 -and $DontAutoDelete.Hostnames -contains $NiniteDevice.name2) -or
+							($NiniteDevice.machine_name -and $DontAutoDelete.Hostnames -contains $NiniteDevice.machine_name) -or  
+							($NiniteDevice.name -and $DontAutoDelete.Ninite -contains $NiniteDevice.name) -or 
+							($NiniteDevice.name2 -and $DontAutoDelete.Ninite -contains $NiniteDevice.name2) -or
+							($NiniteDevice.machine_name -and $DontAutoDelete.Ninite -contains $NiniteDevice.machine_name) -or  
+							$DontAutoDelete.Ninite -contains $OrderedDevice.id
+						)) {
+							$AllowDeletion = $false
+						}
+						if (!$ReadOnly -and $AllowDeletion) {
+							$Deleted = delete_from_ninite -Ninite_ID $NiniteDeviceID -NiniteWebSession $NiniteWebSession -NiniteHeader $NiniteHeader
+							if ($Deleted) {
+								$DeleteNinite = "Yes, auto attempted"
+								$Hostname = if ($NiniteDevice.name) { $NiniteDevice.name } elseif ($NiniteDevice.name2) { $NiniteDevice.name } else { $NiniteDevice.machine_name }
+								log_change -Company_Acronym $Company_Acronym -ServiceTarget "ninite" -RMM_Device_ID $Device.rmm_matches -SC_Device_ID $Device.sc_matches -Sophos_Device_ID $Device.sophos_matches -Ninite_Device_ID $NiniteDeviceID -ChangeType "delete" -Hostname $Hostname -Reason "Inactive"
+							}
+						}
+					}
+
 					$DeleteITG = "No"
 					if ($ITGConnected -and $ITG_IDs -and !$RMMOnly) {
 						if (!$ReadOnly) {
@@ -2715,15 +3235,18 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						InRMM = if ($RMMDeviceID) { "Yes" } else { "No" }
 						InSophos = if ($SophosDeviceID -and !$RMMOnly) { "Yes" } elseif ($SophosDeviceID) { "Yes, but don't delete yet" } elseif ($RMMAntivirus -and $RMMAntivirus -like "Sophos*") { "Yes, missing from portal" } else { "No" }
 						InJC = if ($JCDeviceID -and !$RMMOnly) { "Yes" } elseif ($JCDeviceID) { "Yes, but don't delete yet" } else { "No" }
+						InNinite = if ($NiniteDeviceID -and !$RMMOnly) { "Yes" } elseif ($NiniteDeviceID) { "Yes, but don't delete yet" } else { "No" }
 						DeleteSC = $DeleteSC
 						DeleteRMM = $DeleteRMM
 						DeleteSophos = $DeleteSophos
 						DeleteJC = $DeleteJC
+						DeleteNinite = $DeleteNinite
 						ArchiveITG = $DeleteITG
 						SC_Time = if ($ActivityComparison.sc) { $ActivityComparison.sc[0].last_active } else { "NA" }
 						RMM_Time = if ($ActivityComparison.rmm) { $ActivityComparison.rmm[0].last_active } else { "NA" }
 						Sophos_Time = if ($ActivityComparison.sophos) { $ActivityComparison.sophos[0].last_active } else { "NA" }
 						JC_Time = if ($JCConnected -and $ActivityComparison.jc) { $ActivityComparison.jc[0].last_active } else { "NA" }
+						Ninite_Time = if ($Ninite_Machines -and $ActivityComparison.ninite) { $ActivityComparison.ninite[0].last_active } else { "NA" }
 						SC_Link = $SCLink
 						RMM_Link = $RMMLink
 						Sophos_Link = $SophosLink
@@ -3133,7 +3656,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				}
 	
 				# Get the User ID, if not already in DB, add a new user
-				$User = $ExistingUsers | Where-Object { $_.Username -like $Username }
+				$User = $ExistingUsers | Where-Object { $_.Username -like $Username } | Sort-Object LastUpdated | Select-Object -First 1
 	
 				if (!$User) {
 					# Add user
