@@ -2112,10 +2112,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					$Related_RMMDevices += $RMM_Devices | Where-Object { $_."Serial Number" -like $Device.GuestMachineSerialNumber -and $_."Device UID" -notin $IgnoreRMM }
 				}
 				# Hostname
-				if ($Device.Name.Trim()) {
+				if ($Device.Name.Trim() -and ($Device.GuestOperatingSystemName -notlike "*Mac OS*" -or ($Device.Name -replace "[^0-9]" , '' | Measure-Object -Character).Characters -gt 2)) {
 					$Related_RMMDevices += $RMM_Devices | Where-Object { $_."Device Hostname" -eq $Device.Name -and $_."Device UID" -notin $IgnoreRMM }
 				}
-				if ($Device.GuestMachineName.Trim()) {
+				if ($Device.GuestMachineName.Trim() -and ($Device.GuestOperatingSystemName -notlike "*Mac OS*" -or ($Device.GuestMachineName -replace "[^0-9]" , '' | Measure-Object -Character).Characters -gt 2)) {
 					$Related_RMMDevices += $RMM_Devices | Where-Object { $_."Device Hostname" -eq $Device.GuestMachineName -and $_."Device UID" -notin $IgnoreRMM }
 				}
 				# Mac address  (if this is a VM, only check this if we haven't found any related devices so far. VM's can cause false positives with this search.)
@@ -2139,13 +2139,13 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 				# Description searches as a backup
 				if (!$Related_RMMDevices) {
-					if ($Device.Name.Trim()) {
+					if ($Device.Name.Trim() -and ($Device.GuestOperatingSystemName -notlike "*Mac OS*" -or ($Device.Name -replace "[^0-9]" , '' | Measure-Object -Character).Characters -gt 2)) {
 						$EscapedName = $Device.Name.replace("[", "````[").replace("]", "````]")
 						if ($EscapedName -notlike "MacBook-Pro*") {
 							$Related_RMMDevices += $RMM_Devices | Where-Object { $_."Device Description" -like "*$($EscapedName)*" -and $_."Device UID" -notin $IgnoreRMM }
 						}
 					}
-					if ($Device.GuestMachineName.Trim()) {
+					if ($Device.GuestMachineName.Trim() -and ($Device.GuestOperatingSystemName -notlike "*Mac OS*" -or ($Device.GuestMachineName -replace "[^0-9]" , '' | Measure-Object -Character).Characters -gt 2)) {
 						$EscapedName2 = $Device.GuestMachineName.replace("[", "````[").replace("]", "````]")
 						if ($EscapedName2 -notlike "MacBook-Pro*") {
 							$Related_RMMDevices += $RMM_Devices | Where-Object { $_."Device Description" -like "*$($EscapedName2)*" -and $_."Device UID" -notin $IgnoreRMM }
