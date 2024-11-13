@@ -1419,7 +1419,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 													$Matches[1]
 												}
 											}
-										}}, @{Name="ToDelete"; E={ if ($_.udf.udf30 -eq "True") { $true } else { $false } }}, suspended
+										}}, @{Name="SophosEndpointID"; E={ $_.udf.udf4 }}, @{Name="ToDelete"; E={ if ($_.udf.udf30 -eq "True") { $true } else { $false } }}, suspended
 	$RMM_DevicesHash = @{}
 	foreach ($Device in $RMM_Devices) { 
 		$RMM_DevicesHash[$Device."Device UID"] = $Device
