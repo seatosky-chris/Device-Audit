@@ -3571,6 +3571,11 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 				# Prepare email
 				if ($ChangesFound -or !$CheckChanges) {
+					# Check for duplicate serials in billing
+					$AllBilledSerials = $BillingDevices | Where-Object { $_.SerialNumber -and $_.SerialNumber -notin $IgnoreSerials -and $_.SerialNumber -notlike "123456789*" } | Select-Object -ExpandProperty SerialNumber
+					$DuplicateBilledSerials = $AllBilledSerials | Group-Object | Where-Object {$_.Count -gt 1}
+					$DuplicateDeviceWarning = if (($DuplicateBilledSerials | Measure-Object).Count -gt 0) { $true } else { $false }
+
 					if ($ChangesFound) {
 						# Send changes
 						$EmailSubject = "Bill Needs Updating for $OrgFullName"
@@ -3594,6 +3599,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						$EmailIntro = "The Device Audit for $OrgFullName was updated but no billing history could be found. Please verify this organization's bill is correct. Next month an email will only be sent if changes were made."
 						$EmailTitle = "New Totals"
 						$HTMLBody = ""
+					}
+
+					if ($DuplicateDeviceWarning) {
+						$EmailIntro += "<p><strong>Caution!</strong> At least 2 devices in the billed list share the same serial number. Please verify this is correct. The duplicate serial numbers are: $($DuplicateBilledSerials.Name -join ", ")</p>"
 					}
 
 					$HTMLBody += '<p style="font-family: sans-serif; font-size: 14px; font-weight: normal; margin: 0; Margin-bottom: 15px;">'
