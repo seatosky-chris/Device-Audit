@@ -1314,10 +1314,29 @@ if ($true) {
 
 	# Functions for installing/reinstalling SC/RMM/Sophos
 
-	# Installs RMM on a device using ScreenConnect
+	# Installs/Uninstalls RMM on a device using ScreenConnect
 	# $SC_ID the GUID of the device in screenconnect
 	# $RMM_ORG_ID the GUID of the organization in RMM (found in the organization under Settings > General > ID)
 	# $SCWebSession the web session used to authenticate with Screenconnect previously
+
+	function uninstall_rmm_using_sc($SC_ID, $SCWebSession) {
+		# Get an anti-forgery token from the website
+		$Response = Invoke-WebRequest "$($SCLogin.URL)/Host#Access/All%20Machines//$SC_ID" -WebSession $SCWebSession -Method 'POST' -ContentType 'application/json'
+		$Response.RawContent -match '"antiForgeryToken":"(.+?)"' | Out-Null
+		$AntiForgeryToken = $matches[1]
+
+		if ($AntiForgeryToken) {
+			$RMMUninstallCmd = "#timeout=100000\n@echo off\ntaskkill /f /im gui.exe 2>nul\necho Waiting for Datto RMM to be removed...\n\`"C:\\Program Files (x86)\\CentraStage\\uninst.exe\`" /S 2>nul\npowershell -ExecutionPolicy Bypass -Command \`"Start-Sleep -Seconds 10\`"\nrmdir \`"C:\\Program Files (x86)\\CentraStage\\\`" /S /Q 2>nul\nrmdir \`"C:\\Windows\\System32\\config\\systemprofile\\AppData\\Local\\CentraStage\\\`" /S /Q 2>nul\nrmdir \`"C:\\Windows\\SysWOW64\\config\\systemprofile\\AppData\\Local\\CentraStage\\\`" /S /Q 2>nul\nrmdir \`"%userprofile%\\AppData\\Local\\CentraStage\\\`" /S /Q 2>nul\nrmdir \`"%allusersprofile%\\CentraStage\\\`" /S /Q 2>nul\nREG delete \`"HKEY_LOCAL_MACHINE\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Run\`" /v CentraStage /f 2>nul\necho RMM Uninstall is Complete"
+
+			$FormBody = '[["All Machines"],[{"SessionID": "' + $SC_ID + '","EventType":44,"Data":"' + $RMMUninstallCmd + '"}]]'
+			$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/PageService.ashx/AddSessionEvents" -WebSession $SCWebSession -Headers @{"X-Anti-Forgery-Token" = $AntiForgeryToken} -Body $FormBody -Method 'POST' -ContentType 'application/json'
+			return $true
+		} else {
+			Write-Warning "Could not get an anti-forgery token from Screenconnect. Failed to uninstall RMM for SC device ID: $SC_ID"
+			return $false
+		}
+	}
+
 	function install_rmm_using_sc($SC_ID, $RMM_ORG_ID, $SCWebSession) {
 		# Get an anti-forgery token from the website
 		$Response = Invoke-WebRequest "$($SCLogin.URL)/Host#Access/All%20Machines//$SC_ID" -WebSession $SCWebSession -Method 'POST' -ContentType 'application/json'
@@ -2449,6 +2468,9 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 								if ($SCDevice.GuestOperatingSystemName -like "*Windows*" -and $SCDevice.GuestOperatingSystemName -notlike "*Windows Embedded*") {
 									if ($SCDevice.GuestLastSeen -gt (Get-Date).AddHours(-3)) {
+										if ($AttemptCount -gt 3) {
+											uninstall_rmm_using_sc -SC_ID $SCDevice.SessionID -SCWebSession $SCWebSession
+										}
 										if (install_rmm_using_sc -SC_ID $SCDevice.SessionID -RMM_ORG_ID $RMM_ID -SCWebSession $SCWebSession) {
 											$AutoFix = $true
 											check_failed_attempts @LogParams -LogHistory $LogHistory -Company_Acronym $Company_Acronym -ErrorMessage $EmailError
@@ -2814,6 +2836,9 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 							if ($SCDevice.GuestOperatingSystemName -like "*Windows*" -and $SCDevice.GuestOperatingSystemName -notlike "*Windows Embedded*") {
 								if ($SCDevice.GuestLastSeen -gt (Get-Date).AddHours(-3)) {
+									if ($AttemptCount -gt 3) {
+										uninstall_rmm_using_sc -SC_ID $SCDevice.SessionID -SCWebSession $SCWebSession
+									}
 									if (install_rmm_using_sc -SC_ID $SCDevice.SessionID -RMM_ORG_ID $RMM_ID -SCWebSession $SCWebSession) {
 										$AutoFix = $true
 										check_failed_attempts @LogParams -LogHistory $LogHistory -Company_Acronym $Company_Acronym -ErrorMessage $EmailError
