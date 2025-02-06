@@ -1815,6 +1815,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				continue
 			}
 
+			if ($Device.attributes.archived -eq $true -and $Device.attributes.notes -like "*Decommissioned*") {
+				continue
+			}
+
 			$RelatedDevices = @()
 
 			# ITG to RMM Matches
@@ -1822,9 +1826,9 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			$Related_RMMDevices += ($RMM_Devices | Where-Object {
 				$Device.attributes.'asset-tag' -eq $_.'Device UID' -or 
 				$Device.attributes.name -like $_.'Device Hostname' -or 
-				($Device.attributes.hostname -like $_.'Device Hostname' -and $Device.attributes.hostname) -or 
+				($Device.attributes.hostname -and $Device.attributes.hostname -like $_.'Device Hostname' -and ($_.'Operating System' -notlike "*macOS*" -or ($_.'Device Hostname' -replace "[^0-9]" , '' | Measure-Object -Character).Characters -gt 2)) -or 
 				$Device.attributes.name -like $_.'Device Description' -or 
-				($Device.attributes.hostname -like $_.'Device Description' -and $Device.attributes.hostname) -or 
+				($Device.attributes.hostname -and $Device.attributes.hostname -like $_.'Device Description' -and ($_.'Operating System' -notlike "*macOS*" -or ($_.'Device Description' -replace "[^0-9]" , '' | Measure-Object -Character).Characters -gt 2)) -or 
 				($Device.attributes.'serial-number' -like $_.'Serial Number' -and $Device.attributes.'serial-number' -and $Device.attributes.'serial-number' -notin $IgnoreSerials -and $Device.attributes.'serial-number' -notlike "123456789*")
 			})
 
@@ -1846,6 +1850,17 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					$Related_RMMDevices = $Related_RMMDevices_Filtered
 				}
 			}
+			if (($Related_RMMDevices | Measure-Object).Count -gt 1) {
+				$Related_RMMDevices_Filtered = $Related_RMMDevices | Where-Object { 
+					$CurRMMDescription = $_.'Device Description';
+					($RMM_Devices | Where-Object { $_.'Device Description' -eq $CurRMMDescription } | Measure-Object).Count -eq 1 -and
+					$Device.attributes.name -like $_.'Device Description' -and
+					$Device.attributes.'serial-number' -like $_.'Serial Number'
+				}
+				if (($Related_RMMDevices_Filtered | Measure-Object).Count -gt 0) {
+					$Related_RMMDevices = $Related_RMMDevices_Filtered
+				}
+			}
 
 			# Get existing matches and connect
 			$Related_RMMDevices | ForEach-Object {
@@ -1859,9 +1874,9 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				$Related_SCDevices = @()
 				$Related_SCDevices += ($SC_Devices | Where-Object {
 					$Device.attributes.name -like $_.Name -or 
-					($Device.attributes.hostname -like $_.Name -and $Device.attributes.hostname) -or 
+					($Device.attributes.hostname -and $Device.attributes.hostname -like $_.Name -and ($_.GuestOperatingSystemName -notlike "*Mac OS*" -or ($_.Name -replace "[^0-9]" , '' | Measure-Object -Character).Characters -gt 2)) -or 
 					$Device.attributes.name -like $_.GuestMachineName -or 
-					($Device.attributes.hostname -like $_.GuestMachineName -and $Device.attributes.hostname) -or 
+					($Device.attributes.hostname -and $Device.attributes.hostname -like $_.GuestMachineName -and ($_.GuestOperatingSystemName -notlike "*Mac OS*" -or ($_.GuestMachineName -replace "[^0-9]" , '' | Measure-Object -Character).Characters -gt 2)) -or 
 					($Device.attributes.'serial-number' -like $_.GuestMachineSerialNumber -and $Device.attributes.'serial-number' -and $Device.attributes.'serial-number' -notin $IgnoreSerials -and $Device.attributes.'serial-number' -notlike "123456789*")
 				})
 
@@ -1887,7 +1902,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				$Related_SophosDevices = @()
 				$Related_SophosDevices += ($Sophos_Devices | Where-Object {
 					$Device.attributes.name -eq $_.hostname -or
-					($Device.attributes.hostname -eq $_.hostname -and $Device.attributes.hostname)
+					($Device.attributes.hostname -and $Device.attributes.hostname -eq $_.hostname -and ($_.OS -notlike "*macOS*" -or ($_.hostname -replace "[^0-9]" , '' | Measure-Object -Character).Characters -gt 2))
 				})
 
 				# If matching is for MacOS devices and multiple are found, skip matching
@@ -1925,10 +1940,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			# Autotask to RMM Matches
 			$Related_RMMDevices = @()
 			$Related_RMMDevices += ($RMM_Devices | Where-Object {
-				($Device.rmmDeviceUID -eq $_.'Device UID' -and $Device.rmmDeviceUID) -or 
-				($Device.referenceNumber -eq $_.'Device UID' -and $Device.referenceNumber) -or 
-				$Device.referenceTitle -like $_.'Device Hostname' -or 
-				($Device.rmmDeviceAuditHostname -like $_.'Device Hostname' -and $Device.rmmDeviceAuditHostname) -or 
+				($Device.rmmDeviceUID -and $Device.rmmDeviceUID -eq $_.'Device UID') -or 
+				($Device.referenceNumber -and $Device.referenceNumber -eq $_.'Device UID') -or 
+				($Device.referenceTitle -like $_.'Device Hostname' -and ($_.'Operating System' -notlike "*macOS*" -or ($_.'Device Hostname' -replace "[^0-9]" , '' | Measure-Object -Character).Characters -gt 2)) -or 
+				($Device.rmmDeviceAuditHostname -and $Device.rmmDeviceAuditHostname -like $_.'Device Hostname' -and ($_.'Operating System' -notlike "*macOS*" -or ($_.'Device Hostname' -replace "[^0-9]" , '' | Measure-Object -Character).Characters -gt 2)) -or 
 				($Device.serialNumber -like $_.'Serial Number' -and $Device.serialNumber -and $Device.serialNumber -notin $IgnoreSerials -and $Device.serialNumber -notlike "123456789*")
 			})
 
@@ -1970,13 +1985,13 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			$Related_ITGDevices += ($ITG_Devices | Where-Object {
 				($Device.rmmDeviceUID -eq $_.attributes.'asset-tag' -and $Device.rmmDeviceUID) -or 
 				($Device.referenceNumber -eq $_.attributes.'asset-tag' -and $Device.referenceNumber) -or 
-				$Device.referenceTitle -like $_.attributes.name -or 
-				$Device.referenceTitle -like $_.attributes.hostname -or 
-				($Device.rmmDeviceAuditHostname -like $_.attributes.name -and $Device.rmmDeviceAuditHostname) -or 
-				($Device.rmmDeviceAuditHostname -like $_.attributes.hostname -and $Device.rmmDeviceAuditHostname) -or 
-				($Device.rmmDeviceAuditDescription -like $_.attributes.name -and $Device.rmmDeviceAuditDescription) -or 
-				($Device.rmmDeviceAuditDescription -like $_.attributes.hostname -and $Device.rmmDeviceAuditDescription) -or 
-				($Device.serialNumber -like $_.attributes.'serial-number' -and $Device.serialNumber -and $Device.serialNumber -notin $IgnoreSerials -and $Device.serialNumber -notlike "123456789*")
+				($Device.referenceTitle -like $_.attributes.name -and ($Device.referenceTitle -replace "[^0-9]" , '' | Measure-Object -Character).Characters -gt 2) -or 
+				($Device.referenceTitle -like $_.attributes.hostname -and ($Device.referenceTitle -replace "[^0-9]" , '' | Measure-Object -Character).Characters -gt 2) -or 
+				($Device.rmmDeviceAuditHostname -and $Device.rmmDeviceAuditHostname -like $_.attributes.name -and ($Device.rmmDeviceAuditHostname -replace "[^0-9]" , '' | Measure-Object -Character).Characters -gt 2) -or 
+				($Device.rmmDeviceAuditHostname -and $Device.rmmDeviceAuditHostname -like $_.attributes.hostname -and ($Device.rmmDeviceAuditHostname -replace "[^0-9]" , '' | Measure-Object -Character).Characters -gt 2) -or 
+				($Device.rmmDeviceAuditDescription -and $Device.rmmDeviceAuditDescription -like $_.attributes.name -and ($Device.rmmDeviceAuditDescription -replace "[^0-9]" , '' | Measure-Object -Character).Characters -gt 2) -or 
+				($Device.rmmDeviceAuditDescription -and $Device.rmmDeviceAuditDescription -like $_.attributes.hostname -and ($Device.rmmDeviceAuditDescription -replace "[^0-9]" , '' | Measure-Object -Character).Characters -gt 2) -or 
+				($Device.serialNumber -and $Device.serialNumber -like $_.attributes.'serial-number' -and $Device.serialNumber -notin $IgnoreSerials -and $Device.serialNumber -notlike "123456789*")
 			})
 
 			# Narrow down if more than 1 device found
@@ -2029,9 +2044,9 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			$Related_RMMDevices = @()
 			$Related_RMMDevices += ($RMM_Devices | Where-Object { 
 				$Device.displayName -like $_.'Device Hostname' -or
-				($Device.hostname -like $_.'Device Hostname' -and $Device.hostname) -or 
+				($Device.hostname -like $_.'Device Hostname' -and $Device.hostname -and ($Device.os -notlike "*Mac OS*" -or ($Device.hostname -replace "[^0-9]" , '' | Measure-Object -Character).Characters -gt 2)) -or 
 				$Device.displayName -like $_.'Device Description' -or 
-				($Device.hostname -like $_.'Device Description' -and $Device.hostname) -or 
+				($Device.hostname -like $_.'Device Description' -and $Device.hostname -and $Device.hostname -and ($Device.os -notlike "*Mac OS*" -or ($Device.hostname -replace "[^0-9]" , '' | Measure-Object -Character).Characters -gt 2)) -or 
 				($Device.serialNumber -like $_.'Serial Number' -and $Device.serialNumber -and $Device.serialNumber -notin $IgnoreSerials -and $Device.serialNumber -notlike "123456789*")
 			})
 
@@ -2066,9 +2081,9 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				$Related_SCDevices = @()
 				$Related_SCDevices += ($SC_Devices | Where-Object {
 					$Device.displayName -like $_.Name -or 
-					($Device.hostname -like $_.Name -and $Device.hostname) -or 
+					($Device.hostname -like $_.Name -and $Device.hostname -and ($Device.os -notlike "*Mac OS*" -or ($Device.hostname -replace "[^0-9]" , '' | Measure-Object -Character).Characters -gt 2)) -or 
 					$Device.displayName -like $_.GuestMachineName -or 
-					($Device.hostname -like $_.GuestMachineName -and $Device.hostname) -or 
+					($Device.hostname -like $_.GuestMachineName -and $Device.hostname -and ($Device.os -notlike "*Mac OS*" -or ($Device.hostname -replace "[^0-9]" , '' | Measure-Object -Character).Characters -gt 2)) -or 
 					($Device.serialNumber -like $_.GuestMachineSerialNumber -and $Device.serialNumber -and $Device.serialNumber -notin $IgnoreSerials -and $Device.serialNumber -notlike "123456789*")
 				})
 
@@ -2112,7 +2127,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				$Related_SophosDevices = @()
 				$Related_SophosDevices += ($Sophos_Devices | Where-Object {
 					$Device.displayName -eq $_.hostname -or
-					($Device.hostname -like $_.hostname -and $Device.hostname)
+					($Device.hostname -like $_.hostname -and $Device.hostname -and ($Device.os -notlike "*Mac OS*" -or ($Device.hostname -replace "[^0-9]" , '' | Measure-Object -Character).Characters -gt 2))
 				})
 
 				# If matching is for MacOS devices and multiple are found, skip matching
