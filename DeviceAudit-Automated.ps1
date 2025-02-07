@@ -4611,11 +4611,14 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					if ($ITGConnected -and $ITG_IDs -and !$RMMOnly) {
 						if (!$ReadOnly) {
 							foreach ($ID in $ITG_IDs) {
-								$Deleted = archive_itg -ITG_Device_ID $ID
-								if ($Deleted) {
-									$DeleteITG = "Yes"
-									$ITG_Device = $ITG_DevicesHash[$ID]
-									log_change -Company_Acronym $Company_Acronym -ServiceTarget "itg" -RMM_Device_ID $Device.rmm_matches -SC_Device_ID $Device.sc_matches -Sophos_Device_ID $Device.sophos_matches -ChangeType "delete" -Hostname $ITG_Device.attributes.name -Reason "Inactive"
+								$ITGDevice = $ITG_DevicesHash[$ID]
+								if (!$ITGDevice.attributes.archived) {
+									$Deleted = archive_itg -ITG_Device_ID $ID
+									if ($Deleted) {
+										$DeleteITG = "Yes"
+										$ITG_Device = $ITG_DevicesHash[$ID]
+										log_change -Company_Acronym $Company_Acronym -ServiceTarget "itg" -RMM_Device_ID $Device.rmm_matches -SC_Device_ID $Device.sc_matches -Sophos_Device_ID $Device.sophos_matches -ChangeType "delete" -Hostname $ITG_Device.attributes.name -Reason "Inactive"
+									}
 								}
 							}
 						}
