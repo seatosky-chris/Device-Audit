@@ -1237,7 +1237,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		try {
 			$Azure_Devices = Get-MgDevice -All | Where-Object { $_.OperatingSystem -notin @("Android", "iOS") }
 		} catch {
-			Write-Warning "GDAP is not properly setup. Could not query Azure devices."
+			Write-Warning "GDAP is not properly setup or the Device Audit app has not been approved in the tenant environment. See tenant setup instructions. Could not query Azure devices."
 			$Azure_Devices = @()
 		}
 		try {
