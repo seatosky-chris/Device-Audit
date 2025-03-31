@@ -70,6 +70,7 @@ if ($CurrentTLS -notlike "*Tls12" -and $CurrentTLS -notlike "*Tls13") {
 
 # Import/Install any required modules
 If (Get-Module -ListAvailable -Name "DattoRMM") {Import-module DattoRMM -Force} Else { install-module DattoRMM -Force; import-module DattoRMM -Force}
+If (Get-Module -ListAvailable -Name "CosmosDB") {Import-module CosmosDB -MinimumVersion 5.0.0 } Else { install-module CosmosDB -MinimumVersion 5.0.0 -Force; import-module CosmosDB -MinimumVersion 5.0.0 }
 
 # Connect to Azure (with CosmosDB app)
 $AzureCredentials_CosmosDB = New-Object System.Management.Automation.PSCredential -ArgumentList ($AzureAppCredentials_CosmosDB.AppID, (ConvertTo-SecureString $AzureAppCredentials_CosmosDB.ClientSecret -AsPlainText -Force))

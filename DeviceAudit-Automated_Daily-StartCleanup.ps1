@@ -76,12 +76,30 @@ If (Get-Module -ListAvailable -Name "Az.Resources") {Import-module Az.Resources 
 If (Get-Module -ListAvailable -Name "Microsoft.Graph.Authentication") {Import-module Microsoft.Graph.Authentication -Force} Else { install-module Microsoft.Graph -Force; import-module Microsoft.Graph.Authentication -Force}
 If (Get-Module -ListAvailable -Name "Microsoft.Graph.Identity.DirectoryManagement") {Import-module Microsoft.Graph.Identity.DirectoryManagement -Force}
 If (Get-Module -ListAvailable -Name "Microsoft.Graph.DeviceManagement") {Import-module Microsoft.Graph.DeviceManagement -Force}
-If (Get-Module -ListAvailable -Name "CosmosDB") {Import-module CosmosDB } Else { install-module CosmosDB  -Force; import-module CosmosDB }
+If (Get-Module -ListAvailable -Name "CosmosDB") {Import-module CosmosDB -MinimumVersion 5.0.0 } Else { install-module CosmosDB -MinimumVersion 5.0.0 -Force; import-module CosmosDB -MinimumVersion 5.0.0 }
 If (Get-Module -ListAvailable -Name "DattoRMM") {Import-module DattoRMM -Force} Else { install-module DattoRMM -Force; import-module DattoRMM -Force}
 If (Get-Module -ListAvailable -Name "ITGlueAPI") {Import-module ITGlueAPI -Force} Else { install-module ITGlueAPI -Force; import-module ITGlueAPI -Force}
 If (Get-Module -ListAvailable -Name "AutotaskAPI") {Import-module AutotaskAPI -Force} Else { install-module AutotaskAPI -Force; import-module AutotaskAPI -Force}
 If (Get-Module -ListAvailable -Name "JumpCloud") {Import-module JumpCloud -Force} Else { install-module JumpCloud -Force; import-module JumpCloud -Force}
 If (Get-Module -ListAvailable -Name "Subnet") {Import-module Subnet -Force} Else { install-module Subnet -Force; import-module Subnet -Force}
+
+# The user audit requires CosmosDB 0.0.1 (a custom version), but the Device Audit requires version 5 or greater
+# This makes sure we are running version 5+ without removing the custom version for the User Audit
+$CosmosDBModules = Get-Module -ListAvailable -Name "CosmosDB"
+$HasNewCosmosDBModule = $false
+foreach ($Module in $CosmosDBModules) {
+	if ($Module.Version.Major -lt 5 -and $Module.Version.Major -gt 0) {
+		Remove-Module CosmosDB
+		Uninstall-Module CosmosDB -RequiredVersion $Module.Version
+	} elseif ($Module.Version.Major -ge 5) {
+		$HasNewCosmosDBModule = $true
+	}
+}
+
+if (!$HasNewCosmosDBModule) {
+	Install-Module -Name CosmosDB -MinimumVersion 5.0.0 -Force
+}
+Import-Module CosmosDB -MinimumVersion 5.0.0 -Force
 
 if ($Ninite_Login.MFA_Secret) {
 	Unblock-File -Path "$PSScriptRoot\GoogleAuthenticator.psm1"
