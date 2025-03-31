@@ -67,7 +67,7 @@ $SCLogin = @{
 #
 $SC_Nonce = ""
 
-# $AzureAppCredentials
+# $AzureAppCredentials_AllTenants
 #
 # The login details for an Azure app that gives access to Azure and Intune devices
 # See the readme and AzureAuthApp.ps1 script for more info on setting this up
@@ -76,7 +76,22 @@ $SC_Nonce = ""
 #
 # Not required, but if setup, the audit will link devices to Azure and Intune
 #
-$AzureAppCredentials = @{
+$AzureAppCredentials_AllTenants = @{
+	AppID = ""
+	TenantID = ""
+	ClientSecret = ""
+}
+
+# $AzureAppCredentials_CosmosDB
+#
+# The login details for an Azure app that gives access to CosmosDB in your portal
+# This is a separate app because otherwise it will try to get CosmosDB access
+# to all tenants, which breaks authentication in many cases
+# See the readme for setup instructions
+#
+# Not required, but if setup, the audit will record device usage in CosmosDB
+#
+$AzureAppCredentials_CosmosDB = @{
 	AppID = ""
 	TenantID = ""
 	ClientSecret = ""

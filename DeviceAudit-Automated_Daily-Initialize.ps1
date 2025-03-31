@@ -50,35 +50,9 @@ if ($Ninite_Login.MFA_Secret) {
 	Import-Module "$PSScriptRoot\GoogleAuthenticator.psm1"
 }
 
-# Connect to Azure
-if (Test-Path "$PSScriptRoot\Config Files\AzureServiceAccount.json") {
-	$LastUpdatedAzureCreds = (Get-Item "$PSScriptRoot\Config Files\AzureServiceAccount.json").LastWriteTime
-	if ($LastUpdatedAzureCreds -lt (Get-Date).AddMonths(-3)) {
-		Write-PSFMessage -Level Error -Message "Azure credentials are out of date. Please run Connect-AzAccount to set up your Azure credentials."
-		# Send an email alert
-		$mailbody = @{
-			"From" = $EmailFrom
-			"To" = $EmailTo_FailedFixes
-			"Subject" = "Device Audit - Azure Credentials need updating"
-			"TextContent" = "The Azure credentials are out of date on $env:computername. Please run Connect-AzAccount to set up your Azure credentials."
-		} | ConvertTo-Json -Depth 6
-
-		$headers = @{
-			'x-api-key' = $Email_APIKey.Key
-		}
-		Invoke-RestMethod -Method Post -Uri $Email_APIKey.Url -Body $mailbody -Headers $headers -ContentType application/json
-		exit
-	}
-
-	try {
-		Import-AzContext -Path "$PSScriptRoot\Config Files\AzureServiceAccount.json"
-	} catch {
-		Write-PSFMessage -Level Error -Message "Failed to connect to: Azure"
-	}
-} else {
-	Connect-AzAccount
-	Save-AzContext -Path "$PSScriptRoot\Config Files\AzureServiceAccount.json" -Force
-}
+# Connect to Azure (with multi-tenant app)
+$AzureCredentials = New-Object System.Management.Automation.PSCredential -ArgumentList ($AzureAppCredentials_AllTenants.AppID, (ConvertTo-SecureString $AzureAppCredentials_AllTenants.ClientSecret -AsPlainText -Force))
+Connect-AzAccount -ServicePrincipal -Credential $AzureCredentials -Tenant $AzureAppCredentials_AllTenants.TenantID
 
 # Connect to IT Glue
 $ITGConnected = $false
@@ -983,12 +957,12 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 	# Connect to Microsoft Graph (for Azure/Intune)
 	$AzureConnected = $false
-	if ($AzureAppCredentials -and $Azure_TenantID) {
+	if ($AzureAppCredentials_AllTenants -and $Azure_TenantID) {
 		$AuthBody = @{
 			grant_type		= "client_credentials"
 			scope			= "https://graph.microsoft.com/.default"
-			client_id		= $AzureAppCredentials.AppID
-			client_secret	= $AzureAppCredentials.ClientSecret
+			client_id		= $AzureAppCredentials_AllTenants.AppID
+			client_secret	= $AzureAppCredentials_AllTenants.ClientSecret
 		}
 
 		$conn = Invoke-RestMethod `
@@ -1002,7 +976,6 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			$AzureConnected = $true
 		}
 	}
-	$AzureConnected = $false # Disable for now until fixed
 
 	############
 	# Connect to the Sophos API to get the device list from Sophos
@@ -4078,3 +4051,4 @@ if ($DeviceAuditSpreadsheetsUpdated) {
 
 # Cleanup
 Disconnect-MgGraph
+Disconnect-AzAccount

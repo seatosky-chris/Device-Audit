@@ -11,16 +11,16 @@ If (Get-Module -ListAvailable -Name "Microsoft.Graph.Identity.DirectoryManagemen
 . "$PSScriptRoot\Config Files\APIKeys.ps1" # API Keys
 
 $AzureConnected = $false
-if ($AzureAppCredentials -and $Azure_TenantID) {
+if ($AzureAppCredentials_AllTenants -and $Azure_TenantID) {
 	$AuthBody = @{
 		grant_type		= "client_credentials"
 		scope			= "https://graph.microsoft.com/.default"
-		client_id		= $AzureAppCredentials.AppID
-		client_secret	= $AzureAppCredentials.ClientSecret
+		client_id		= $AzureAppCredentials_AllTenants.AppID
+		client_secret	= $AzureAppCredentials_AllTenants.ClientSecret
 	}
 
 	$conn = Invoke-RestMethod `
-		-Uri "https://login.microsoftonline.com/$($AzureAppCredentials.TenantID)/oauth2/v2.0/token" `
+		-Uri "https://login.microsoftonline.com/$($AzureAppCredentials_AllTenants.TenantID)/oauth2/v2.0/token" `
 		-Method POST `
 		-Body $AuthBody
 

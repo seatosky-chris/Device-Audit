@@ -71,6 +71,10 @@ if ($CurrentTLS -notlike "*Tls12" -and $CurrentTLS -notlike "*Tls13") {
 # Import/Install any required modules
 If (Get-Module -ListAvailable -Name "DattoRMM") {Import-module DattoRMM -Force} Else { install-module DattoRMM -Force; import-module DattoRMM -Force}
 
+# Connect to Azure (with CosmosDB app)
+$AzureCredentials_CosmosDB = New-Object System.Management.Automation.PSCredential -ArgumentList ($AzureAppCredentials_CosmosDB.AppID, (ConvertTo-SecureString $AzureAppCredentials_CosmosDB.ClientSecret -AsPlainText -Force))
+Connect-AzAccount -ServicePrincipal -Credential $AzureCredentials_CosmosDB -Tenant $AzureAppCredentials_CosmosDB.TenantID
+
 # Connect to IT Glue
 $ITGConnected = $false
 if ($ITGAPIKey.Key) {
@@ -1638,24 +1642,41 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	##############
 
 	# Save each user and the computer(s) they are using into the Usage database (for user audits and documenting who uses each computer)
-	if ($DOUsageDBSave) {
+	if ($DOUsageDBSave -and $AzureCredentials_CosmosDB) {
 		# Connect to Account and DB
 		$Account_Name = "stats-$($Company_Acronym.ToLower())"
-		$Account = Get-CosmosDbAccount -Name $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup
-		if (!$Account) {
+		$Account = Get-CosmosDbAccount -Name $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup 2>&1
+		Write-PSFMessage -Level Verbose -Message "Saving Usage, AccountName: $($Account_Name) ResourceGroupName: $($Database_Connection.ResourceGroup)"
+		if (!$Account -or ($Account.GetType()).Name -eq 'ErrorRecord') {
+			Write-PSFMessage -Level Verbose -Message "No DB account found for: $Company_Acronym"
 			try {
 				New-CosmosDbAccount -Name $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup -Location 'WestUS2' -Capability @('EnableServerless')
 			} catch { 
+				Write-PSFMessage -Level Verbose -Message "Account creation failed for $Company_Acronym. Exiting..."
 				Write-Host "Account creation failed for $Company_Acronym. Exiting..." -ForegroundColor Red
 				exit
 			} 
 			$Account = Get-CosmosDbAccount -Name $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup
 			
 		}
-		$PrimaryKey = Get-CosmosDbAccountMasterKey -Name $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup
 
 		$DB_Name = "DeviceUsage"
-		$cosmosDbContext = New-CosmosDbContext -Account $Account_Name -Database $DB_Name -Key $PrimaryKey
+		$backoffPolicy = New-CosmosDbBackoffPolicy -MaxRetries 5
+		$cosmosDbContext_management = $null
+		$entraIdOAuthToken = Get-CosmosDbEntraIdToken -Endpoint "https://$Account_Name.documents.azure.com" -WarningAction SilentlyContinue
+
+		$newCosmosDbContextParams  = @{
+			Account      	= $Account_Name
+			EntraIdToken 	= $entraIdOAuthToken
+			Database 		= $DB_Name
+			BackoffPolicy 	= $backoffPolicy
+		}
+		$cosmosDbContext = (New-CosmosDbContext @newCosmosDbContextParams) 2>&1
+
+		if (!$cosmosDbContext -or ($cosmosDbContext.GetType()).Name -eq 'ErrorRecord') {
+			Write-PSFMessage -Level Verbose -Message "Could not get cosmos db context. Exiting..."
+			exit
+		}
 		
 		Write-Host "Saving usage stats..."
 	
@@ -2070,3 +2091,5 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		Invoke-RestMethod @Params
 	}
 }
+
+Disconnect-AzAccount

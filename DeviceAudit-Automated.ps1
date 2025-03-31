@@ -84,34 +84,12 @@ if ($Ninite_Login.MFA_Secret) {
 	Import-Module "$PSScriptRoot\GoogleAuthenticator.psm1"
 }
 
-# Connect to Azure
-if (Test-Path "$PSScriptRoot\Config Files\AzureServiceAccount.json") {
-	$LastUpdatedAzureCreds = (Get-Item "$PSScriptRoot\Config Files\AzureServiceAccount.json").LastWriteTime
-	if ($LastUpdatedAzureCreds -lt (Get-Date).AddMonths(-3)) {
-		Write-PSFMessage -Level Error -Message "Azure credentials are out of date. Please run Connect-AzAccount to set up your Azure credentials."
-		# Send an email alert
-		$mailbody = @{
-			"From" = $EmailFrom
-			"To" = $EmailTo_FailedFixes
-			"Subject" = "Device Audit - Azure Credentials need updating"
-			"TextContent" = "The Azure credentials are out of date on $env:computername. Please run Connect-AzAccount to set up your Azure credentials."
-		} | ConvertTo-Json -Depth 6
-
-		$headers = @{
-			'x-api-key' = $Email_APIKey.Key
-		}
-		Invoke-RestMethod -Method Post -Uri $Email_APIKey.Url -Body $mailbody -Headers $headers -ContentType application/json
-		exit
-	}
-
-	try {
-		Import-AzContext -Path "$PSScriptRoot\Config Files\AzureServiceAccount.json"
-	} catch {
-		Write-PSFMessage -Level Error -Message "Failed to connect to: Azure"
-	}
-} else {
-	Connect-AzAccount
-	Save-AzContext -Path "$PSScriptRoot\Config Files\AzureServiceAccount.json" -Force
+# Connect to Azure (with multi-tenant app)
+$AzureCredentials = New-Object System.Management.Automation.PSCredential -ArgumentList ($AzureAppCredentials_AllTenants.AppID, (ConvertTo-SecureString $AzureAppCredentials_AllTenants.ClientSecret -AsPlainText -Force))
+Connect-AzAccount -ServicePrincipal -Credential $AzureCredentials -Tenant $AzureAppCredentials_AllTenants.TenantID
+# Setup CosmosDB app credentials for later
+if ($AzureAppCredentials_CosmosDB) {
+	$AzureCredentials_CosmosDB = New-Object System.Management.Automation.PSCredential -ArgumentList ($AzureAppCredentials_CosmosDB.AppID, (ConvertTo-SecureString $AzureAppCredentials_CosmosDB.ClientSecret -AsPlainText -Force))
 }
 
 # Get CPU data and Download new CPU data if older than 2 weeks
@@ -1601,12 +1579,12 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 	# Connect to Microsoft Graph (for Azure/Intune)
 	$AzureConnected = $false
-	if ($AzureAppCredentials -and $Azure_TenantID) {
+	if ($AzureAppCredentials_AllTenants -and $Azure_TenantID) {
 		$AuthBody = @{
 			grant_type		= "client_credentials"
 			scope			= "https://graph.microsoft.com/.default"
-			client_id		= $AzureAppCredentials.AppID
-			client_secret	= $AzureAppCredentials.ClientSecret
+			client_id		= $AzureAppCredentials_AllTenants.AppID
+			client_secret	= $AzureAppCredentials_AllTenants.ClientSecret
 		}
 
 		$conn = Invoke-RestMethod `
@@ -1620,7 +1598,6 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			$AzureConnected = $true
 		}
 	}
-	$AzureConnected = $false # Disable for now until fixed
 
 	############
 	# Connect to the Sophos API to get the device list from Sophos
@@ -4675,24 +4652,65 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	}
 
 	# Save each user and the computer(s) they are using into the Usage database (for user audits and documenting who uses each computer), then update users assigned to each computer
-	if ($DOUsageDBSave) {
+	if ($DOUsageDBSave -and $AzureCredentials_CosmosDB) {
+		# Connect to the Azure app for CosmosDB
+		Disconnect-AzAccount | Out-Null
+		$null = Connect-AzAccount -ServicePrincipal -Credential $AzureCredentials_CosmosDB -Tenant $AzureAppCredentials_CosmosDB.TenantID -InformationAction SilentlyContinue
+
 		# Connect to Account and DB
 		$Account_Name = "stats-$($Company_Acronym.ToLower())"
-		$Account = Get-CosmosDbAccount -Name $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup
-		if (!$Account) {
+		$Account = Get-CosmosDbAccount -Name $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup 2>&1
+		Write-PSFMessage -Level Verbose -Message "Saving Usage, AccountName: $($Account_Name) ResourceGroupName: $($Database_Connection.ResourceGroup)"
+		if (!$Account -or ($Account.GetType()).Name -eq 'ErrorRecord') {
+			Write-PSFMessage -Level Warning -Message "No DB account found for: $Company_Acronym"
 			try {
 				New-CosmosDbAccount -Name $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup -Location 'WestUS2' -Capability @('EnableServerless')
 			} catch { 
+				Write-PSFMessage -Level Error -Message "Account creation failed for $Company_Acronym. Exiting..."
 				Write-Host "Account creation failed for $Company_Acronym. Exiting..." -ForegroundColor Red
 				exit
 			} 
 			$Account = Get-CosmosDbAccount -Name $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup
 			
 		}
-		$PrimaryKey = Get-CosmosDbAccountMasterKey -Name $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup
 
 		$DB_Name = "DeviceUsage"
-		$cosmosDbContext = New-CosmosDbContext -Account $Account_Name -Database $DB_Name -Key $PrimaryKey
+		$backoffPolicy = New-CosmosDbBackoffPolicy -MaxRetries 5
+		$cosmosDbContext_management = $null
+		$entraIdOAuthToken = Get-CosmosDbEntraIdToken -Endpoint "https://$Account_Name.documents.azure.com" -WarningAction SilentlyContinue
+
+		$newCosmosDbContextParams  = @{
+			Account      	= $Account_Name
+			EntraIdToken 	= $entraIdOAuthToken
+			Database 		= $DB_Name
+			BackoffPolicy 	= $backoffPolicy
+		}
+		$cosmosDbContext = (New-CosmosDbContext @newCosmosDbContextParams) 2>&1
+
+		if (!$cosmosDbContext -or ($cosmosDbContext.GetType()).Name -eq 'ErrorRecord') {
+			Write-PSFMessage -Level Error -Message "Could not get cosmos db context. Exiting..."
+			exit
+		}
+
+		# Setup permissions if the device audit app does not have read/write access to the account
+		try {
+			Get-CosmosDbDatabase -Context $cosmosDbContext -Id $DB_Name | Out-Null
+		} catch {
+			if ($_.Exception.Response.StatusCode -eq "Forbidden") {
+				$appObjectId = (Get-AzADServicePrincipal -ApplicationId $AzureAppCredentials_CosmosDB.AppID).Id
+				$CosmosDBRoles = Get-AzCosmosDBSqlRoleDefinition -ResourceGroupName $Database_Connection.ResourceGroup -AccountName $Account_Name
+				$CosmosDBRoles | ForEach-Object {
+					$parameters = @{
+						ResourceGroupName = $Database_Connection.ResourceGroup
+						AccountName = $Account_Name
+						RoleDefinitionId = $_.Id
+						PrincipalId = $appObjectId
+						Scope = $Account.Id
+					}    
+					New-AzCosmosDBSqlRoleAssignment @parameters
+				}
+			}
+		}
 	
 		# Create new DB if one does not already exist
 		try {
@@ -4700,8 +4718,12 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		} catch {
 			if ($_.Exception.Response.StatusCode -eq "NotFound") {
 				try {
-					New-CosmosDbDatabase -Context $cosmosDbContext -Id $DB_Name | Out-Null
+					if (!$cosmosDbContext_management) {
+						$cosmosDbContext_management = New-CosmosDbContext -Account $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup -MasterKeyType PrimaryMasterKey -BackoffPolicy $backoffPolicy
+					}
+					New-CosmosDbDatabase -Context $cosmosDbContext_management -Id $DB_Name | Out-Null
 				} catch { 
+					Write-PSFMessage -Level Error -Message "Database creation failed. Exiting..."
 					Write-Host "Database creation failed. Exiting..." -ForegroundColor Red
 					exit
 				}
@@ -4713,9 +4735,13 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			Get-CosmosDbCollection -Context $cosmosDbContext -Id "Users" | Out-Null
 		} catch {
 			try {
-				New-CosmosDbCollection -Context $cosmosDbContext -Database $DB_Name -Id "Users" -PartitionKey "type" | Out-Null
+				if (!$cosmosDbContext_management) {
+					$cosmosDbContext_management = New-CosmosDbContext -Account $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup -MasterKeyType PrimaryMasterKey -BackoffPolicy $backoffPolicy
+				}
+				New-CosmosDbCollection -Context $cosmosDbContext_management -Database $DB_Name -Id "Users" -PartitionKey "type" | Out-Null
 			} catch {
-				Write-Host "Table creation failed. Exiting..." -ForegroundColor Red
+				Write-PSFMessage -Level Error -Message "Table 'Users' creation failed. Exiting..."
+				Write-Host "Table 'Users' creation failed. Exiting..." -ForegroundColor Red
 				exit
 			}
 			Write-Host "Created new table: Users"
@@ -4724,9 +4750,13 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			Get-CosmosDbCollection -Context $cosmosDbContext -Id "Computers" | Out-Null
 		} catch {
 			try {
-				New-CosmosDbCollection -Context $cosmosDbContext -Database $DB_Name -Id "Computers" -PartitionKey "type"| Out-Null
+				if (!$cosmosDbContext_management) {
+					$cosmosDbContext_management = New-CosmosDbContext -Account $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup -MasterKeyType PrimaryMasterKey -BackoffPolicy $backoffPolicy
+				}
+				New-CosmosDbCollection -Context $cosmosDbContext_management -Database $DB_Name -Id "Computers" -PartitionKey "type"| Out-Null
 			} catch {
-				Write-Host "Table creation failed. Exiting..." -ForegroundColor Red
+				Write-PSFMessage -Level Error -Message "Table 'Computers' creation failed. Exiting..."
+				Write-Host "Table 'Computers' creation failed. Exiting..." -ForegroundColor Red
 				exit
 			}
 			Write-Host "Created new table: Computers"
@@ -4735,15 +4765,20 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			Get-CosmosDbCollection -Context $cosmosDbContext -Id "Usage" | Out-Null
 		} catch {
 			try {
-				New-CosmosDbCollection -Context $cosmosDbContext -Database $DB_Name -Id "Usage" -PartitionKey "yearmonth" | Out-Null
+				if (!$cosmosDbContext_management) {
+					$cosmosDbContext_management = New-CosmosDbContext -Account $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup -MasterKeyType PrimaryMasterKey -BackoffPolicy $backoffPolicy
+				}
+				New-CosmosDbCollection -Context $cosmosDbContext_management -Database $DB_Name -Id "Usage" -PartitionKey "yearmonth" | Out-Null
 			} catch {
-				Write-Host "Table creation failed. Exiting..." -ForegroundColor Red
+				Write-PSFMessage -Level Error -Message "Table 'Usage' creation failed. Exiting..."
+				Write-Host "Table 'Usage' creation failed. Exiting..." -ForegroundColor Red
 				exit
 			}
 			Write-Host "Created new table: Usage"
 		}
 		
 		Write-Host "Saving usage stats..."
+		Write-PSFMessage -Level Verbose -Message "Saving usage stats..."
 	
 		$Now = Get-Date
 		$Now_UTC = Get-Date (Get-Date).ToUniversalTime() -UFormat '+%Y-%m-%dT%H:%M:%S.000Z'
@@ -5111,10 +5146,12 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			try {
 				New-CosmosDbCollection -Context $cosmosDbContext -Database $DB_Name -Id "Variables" -PartitionKey "variable" | Out-Null
 			} catch {
-				Write-Host "Table creation failed. Exiting..." -ForegroundColor Red
+				Write-PSFMessage -Level Error -Message "Table 'Variables' creation failed. Exiting..."
+				Write-Host "Table 'Variables' creation failed. Exiting..." -ForegroundColor Red
 				exit
 			}
 			Write-Host "Created new table: Variables"
+			Write-PSFMessage -Level Verbose -Message "Created new table: Variables"
 		}
 		try {
 			Get-CosmosDbCollection -Context $cosmosDbContext -Id "ComputerUsage" | Out-Null
@@ -5122,10 +5159,12 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			try {
 				New-CosmosDbCollection -Context $cosmosDbContext -Database $DB_Name -Id "ComputerUsage" -PartitionKey "id" | Out-Null
 			} catch {
-				Write-Host "Table creation failed. Exiting..." -ForegroundColor Red
+				Write-PSFMessage -Level Error -Message "Table 'ComputerUsage' creation failed. Exiting..."
+				Write-Host "Table 'ComputerUsage' creation failed. Exiting..." -ForegroundColor Red
 				exit
 			}
 			Write-Host "Created new table: ComputerUsage"
+			Write-PSFMessage -Level Verbose -Message "Created new table: ComputerUsage"
 		}
 		try {
 			Get-CosmosDbCollection -Context $cosmosDbContext -Id "UserUsage" | Out-Null
@@ -5133,10 +5172,12 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			try {
 				New-CosmosDbCollection -Context $cosmosDbContext -Database $DB_Name -Id "UserUsage" -PartitionKey "id" | Out-Null
 			} catch {
-				Write-Host "Table creation failed. Exiting..." -ForegroundColor Red
+				Write-PSFMessage -Level Error -Message "Table 'UserUsage' creation failed. Exiting..."
+				Write-Host "Table 'UserUsage' creation failed. Exiting..." -ForegroundColor Red
 				exit
 			}
 			Write-Host "Created new table: UserUsage"
+			Write-PSFMessage -Level Verbose -Message "Created new table: UserUsage"
 		}
 	
 		# Get the last time we updated the monthly stats
@@ -5975,6 +6016,10 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	
 		Write-Host "Usage Stats Saved!"
 		Write-Host "===================="
+
+		# Reconnect to the main Azure service principal
+		Disconnect-AzAccount | Out-Null
+		$null = Connect-AzAccount -ServicePrincipal -Credential $AzureCredentials -Tenant $AzureAppCredentials_AllTenants.TenantID
 	}
 
 	# Save Sophos Tamper Protection keys (once a week)
@@ -8157,3 +8202,4 @@ if ($DeviceAuditSpreadsheetsUpdated) {
 
 # Cleanup
 Disconnect-MgGraph
+Disconnect-AzAccount
