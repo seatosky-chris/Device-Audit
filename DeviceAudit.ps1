@@ -3945,767 +3945,795 @@ if ($DOUsageDBSave -and $AzureCredentials_CosmosDB) {
 	Disconnect-AzAccount | Out-Null
 	$null = Connect-AzAccount -ServicePrincipal -Credential $AzureCredentials_CosmosDB -Tenant $AzureAppCredentials_CosmosDB.TenantID -InformationAction SilentlyContinue
 
-	# Connect to Account and DB
-	$Account_Name = "stats-$($Company_Acronym.ToLower())"
-	$Account = Get-CosmosDbAccount -Name $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup 2>&1
-	Write-PSFMessage -Level Verbose -Message "Saving Usage, AccountName: $($Account_Name) ResourceGroupName: $($Database_Connection.ResourceGroup)"
-	if (!$Account -or ($Account.GetType()).Name -eq 'ErrorRecord') {
-		Write-PSFMessage -Level Warning -Message "No DB account found for: $Company_Acronym"
+	# Use a while loop and break at the end, this allows us to break out of it at any time if there is an issue updating the DB (which beats having a ton of nested for loops!)
+	:continueDBOperationswhile while ($true) {
+		# Connect to Account and DB
+		$Account_Name = "stats-$($Company_Acronym.ToLower())"
+		$Account = Get-CosmosDbAccount -Name $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup 2>&1
+		Write-PSFMessage -Level Verbose -Message "Saving Usage, AccountName: $($Account_Name) ResourceGroupName: $($Database_Connection.ResourceGroup)"
+		if (!$Account -or ($Account.GetType()).Name -eq 'ErrorRecord') {
+			Write-PSFMessage -Level Warning -Message "No DB account found for: $Company_Acronym"
+			try {
+				New-CosmosDbAccount -Name $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup -Location 'WestUS2' -Capability @('EnableServerless')
+			} catch { 
+				Write-PSFMessage -Level Error -Message "Account creation failed for $Company_Acronym. Exiting..."
+				Write-Host "Account creation failed for $Company_Acronym. Exiting..." -ForegroundColor Red
+				break continueDBOperations
+			} 
+			$Account = Get-CosmosDbAccount -Name $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup
+			
+		}
+
+		$DB_Name = "DeviceUsage"
+		$backoffPolicy = New-CosmosDbBackoffPolicy -MaxRetries 5
+		$cosmosDbContext_management = $null
+		$entraIdOAuthToken = Get-CosmosDbEntraIdToken -Endpoint "https://$Account_Name.documents.azure.com" -WarningAction SilentlyContinue
+
+		$newCosmosDbContextParams  = @{
+			Account      	= $Account_Name
+			EntraIdToken 	= $entraIdOAuthToken
+			Database 		= $DB_Name
+			BackoffPolicy 	= $backoffPolicy
+		}
+		$cosmosDbContext = (New-CosmosDbContext @newCosmosDbContextParams) 2>&1
+
+		if (!$cosmosDbContext -or ($cosmosDbContext.GetType()).Name -eq 'ErrorRecord') {
+			Write-PSFMessage -Level Error -Message "Could not get cosmos db context. Exiting..."
+			break continueDBOperations
+		}
+
+		# Setup permissions if the device audit app does not have read/write access to the account
+		$AdditionalChecks = $false
 		try {
-			New-CosmosDbAccount -Name $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup -Location 'WestUS2' -Capability @('EnableServerless')
-		} catch { 
-			Write-PSFMessage -Level Error -Message "Account creation failed for $Company_Acronym. Exiting..."
-			Write-Host "Account creation failed for $Company_Acronym. Exiting..." -ForegroundColor Red
-			exit
-		} 
-		$Account = Get-CosmosDbAccount -Name $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup
-		
-	}
-
-	$DB_Name = "DeviceUsage"
-	$backoffPolicy = New-CosmosDbBackoffPolicy -MaxRetries 5
-	$cosmosDbContext_management = $null
-	$entraIdOAuthToken = Get-CosmosDbEntraIdToken -Endpoint "https://$Account_Name.documents.azure.com" -WarningAction SilentlyContinue
-
-	$newCosmosDbContextParams  = @{
-		Account      	= $Account_Name
-		EntraIdToken 	= $entraIdOAuthToken
-		Database 		= $DB_Name
-		BackoffPolicy 	= $backoffPolicy
-	}
-	$cosmosDbContext = (New-CosmosDbContext @newCosmosDbContextParams) 2>&1
-
-	if (!$cosmosDbContext -or ($cosmosDbContext.GetType()).Name -eq 'ErrorRecord') {
-		Write-PSFMessage -Level Error -Message "Could not get cosmos db context. Exiting..."
-		exit
-	}
-
-	# Setup permissions if the device audit app does not have read/write access to the account
-	try {
-		Get-CosmosDbDatabase -Context $cosmosDbContext -Id $DB_Name | Out-Null
-	} catch {
-		if ($_.Exception.Response.StatusCode -eq "Forbidden") {
-			$appObjectId = (Get-AzADServicePrincipal -ApplicationId $AzureAppCredentials_CosmosDB.AppID).Id
-			$CosmosDBRoles = Get-AzCosmosDBSqlRoleDefinition -ResourceGroupName $Database_Connection.ResourceGroup -AccountName $Account_Name
-			$CosmosDBRoles | ForEach-Object {
-				$parameters = @{
-					ResourceGroupName = $Database_Connection.ResourceGroup
-					AccountName = $Account_Name
-					RoleDefinitionId = $_.Id
-					PrincipalId = $appObjectId
-					Scope = $Account.Id
-				}    
-				New-AzCosmosDBSqlRoleAssignment @parameters
+			Get-CosmosDbDatabase -Context $cosmosDbContext -Id $DB_Name | Out-Null
+		} catch {
+			$AdditionalChecks = $true
+			if ($_.Exception.Response.StatusCode -eq "Forbidden") {
+				$appObjectId = (Get-AzADServicePrincipal -ApplicationId $AzureAppCredentials_CosmosDB.AppID).Id
+				$CosmosDBRoles = Get-AzCosmosDBSqlRoleDefinition -ResourceGroupName $Database_Connection.ResourceGroup -AccountName $Account_Name
+				$CosmosDBRoles | ForEach-Object {
+					$parameters = @{
+						ResourceGroupName = $Database_Connection.ResourceGroup
+						AccountName = $Account_Name
+						RoleDefinitionId = $_.Id
+						PrincipalId = $appObjectId
+						Scope = $Account.Id
+					}    
+					New-AzCosmosDBSqlRoleAssignment @parameters
+				}
 			}
 		}
-	}
 
-	# Create new DB if one does not already exist
-	try {
-		Get-CosmosDbDatabase -Context $cosmosDbContext -Id $DB_Name | Out-Null
-	} catch {
-		if ($_.Exception.Response.StatusCode -eq "NotFound") {
+		if ($AdditionalChecks) {
+			# Check if our access is still forbidden
+			try {
+				Get-CosmosDbDatabase -Context $cosmosDbContext -Id $DB_Name | Out-Null
+			} catch {
+				if ($_.Exception.Response.StatusCode -eq "Forbidden") {
+					Write-PSFMessage -Level Error -Message "Could not query the CosmosDB database despire setting up permissions. Access is likely forbidden due to the Cosmos Firewall. Please verify the DB's networking has Public Network Access allowed on All Networks."
+					Write-Host "Could not query the CosmosDB database despire setting up permissions. Access is likely forbidden due to the Cosmos Firewall. Please verify the DB's networking has Public Network Access allowed on All Networks." -ForegroundColor Red
+					break continueDBOperations
+				}
+			}
+
+			# Create new DB if one does not already exist
+			try {
+				Get-CosmosDbDatabase -Context $cosmosDbContext -Id $DB_Name | Out-Null
+			} catch {
+				if ($_.Exception.Response.StatusCode -eq "NotFound") {
+					try {
+						if (!$cosmosDbContext_management) {
+							$cosmosDbContext_management = New-CosmosDbContext -Account $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup -MasterKeyType PrimaryMasterKey -BackoffPolicy $backoffPolicy
+						}
+						New-CosmosDbDatabase -Context $cosmosDbContext_management -Id $DB_Name | Out-Null
+					} catch { 
+						Write-PSFMessage -Level Error -Message "Database creation failed. Exiting..."
+						Write-Host "Database creation failed. Exiting..." -ForegroundColor Red
+						break continueDBOperations
+					}
+				}
+			}
+		}
+
+		# Create collections for this customer if they don't already exist
+		try {
+			Get-CosmosDbCollection -Context $cosmosDbContext -Id "Users" | Out-Null
+		} catch {
 			try {
 				if (!$cosmosDbContext_management) {
 					$cosmosDbContext_management = New-CosmosDbContext -Account $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup -MasterKeyType PrimaryMasterKey -BackoffPolicy $backoffPolicy
 				}
-				New-CosmosDbDatabase -Context $cosmosDbContext_management -Id $DB_Name | Out-Null
-			} catch { 
-				Write-PSFMessage -Level Error -Message "Database creation failed. Exiting..."
-				Write-Host "Database creation failed. Exiting..." -ForegroundColor Red
-				exit
+				New-CosmosDbCollection -Context $cosmosDbContext_management -Database $DB_Name -Id "Users" -PartitionKey "type" | Out-Null
+			} catch {
+				Write-PSFMessage -Level Error -Message "Table 'Users' creation failed. Exiting..."
+				Write-Host "Table 'Users' creation failed. Exiting..." -ForegroundColor Red
+				break continueDBOperations
 			}
+			Write-Host "Created new table: Users"
 		}
-	}
-
-	# Create collections for this customer if they don't already exist
-	try {
-		Get-CosmosDbCollection -Context $cosmosDbContext -Id "Users" | Out-Null
-	} catch {
 		try {
-			if (!$cosmosDbContext_management) {
-				$cosmosDbContext_management = New-CosmosDbContext -Account $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup -MasterKeyType PrimaryMasterKey -BackoffPolicy $backoffPolicy
-			}
-			New-CosmosDbCollection -Context $cosmosDbContext_management -Database $DB_Name -Id "Users" -PartitionKey "type" | Out-Null
+			Get-CosmosDbCollection -Context $cosmosDbContext -Id "Computers" | Out-Null
 		} catch {
-			Write-PSFMessage -Level Error -Message "Table 'Users' creation failed. Exiting..."
-			Write-Host "Table 'Users' creation failed. Exiting..." -ForegroundColor Red
-			exit
+			try {
+				if (!$cosmosDbContext_management) {
+					$cosmosDbContext_management = New-CosmosDbContext -Account $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup -MasterKeyType PrimaryMasterKey -BackoffPolicy $backoffPolicy
+				}
+				New-CosmosDbCollection -Context $cosmosDbContext_management -Database $DB_Name -Id "Computers" -PartitionKey "type"| Out-Null
+			} catch {
+				Write-PSFMessage -Level Error -Message "Table 'Computers' creation failed. Exiting..."
+				Write-Host "Table 'Computers' creation failed. Exiting..." -ForegroundColor Red
+				break continueDBOperations
+			}
+			Write-Host "Created new table: Computers"
 		}
-		Write-Host "Created new table: Users"
-	}
-	try {
-		Get-CosmosDbCollection -Context $cosmosDbContext -Id "Computers" | Out-Null
-	} catch {
 		try {
-			if (!$cosmosDbContext_management) {
-				$cosmosDbContext_management = New-CosmosDbContext -Account $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup -MasterKeyType PrimaryMasterKey -BackoffPolicy $backoffPolicy
-			}
-			New-CosmosDbCollection -Context $cosmosDbContext_management -Database $DB_Name -Id "Computers" -PartitionKey "type"| Out-Null
+			Get-CosmosDbCollection -Context $cosmosDbContext -Id "Usage" | Out-Null
 		} catch {
-			Write-PSFMessage -Level Error -Message "Table 'Computers' creation failed. Exiting..."
-			Write-Host "Table 'Computers' creation failed. Exiting..." -ForegroundColor Red
-			exit
+			try {
+				if (!$cosmosDbContext_management) {
+					$cosmosDbContext_management = New-CosmosDbContext -Account $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup -MasterKeyType PrimaryMasterKey -BackoffPolicy $backoffPolicy
+				}
+				New-CosmosDbCollection -Context $cosmosDbContext_management -Database $DB_Name -Id "Usage" -PartitionKey "yearmonth" | Out-Null
+			} catch {
+				Write-PSFMessage -Level Error -Message "Table 'Usage' creation failed. Exiting..."
+				Write-Host "Table 'Usage' creation failed. Exiting..." -ForegroundColor Red
+				break continueDBOperations
+			}
+			Write-Host "Created new table: Usage"
 		}
-		Write-Host "Created new table: Computers"
-	}
-	try {
-		Get-CosmosDbCollection -Context $cosmosDbContext -Id "Usage" | Out-Null
-	} catch {
-		try {
-			if (!$cosmosDbContext_management) {
-				$cosmosDbContext_management = New-CosmosDbContext -Account $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup -MasterKeyType PrimaryMasterKey -BackoffPolicy $backoffPolicy
-			}
-			New-CosmosDbCollection -Context $cosmosDbContext_management -Database $DB_Name -Id "Usage" -PartitionKey "yearmonth" | Out-Null
-		} catch {
-			Write-PSFMessage -Level Error -Message "Table 'Usage' creation failed. Exiting..."
-			Write-Host "Table 'Usage' creation failed. Exiting..." -ForegroundColor Red
-			exit
-		}
-		Write-Host "Created new table: Usage"
-	}
-	
-	Write-Host "Saving usage stats..."
-	Write-PSFMessage -Level Verbose -Message "Saving usage stats..."
+		
+		Write-Host "Saving usage stats..."
+		Write-PSFMessage -Level Verbose -Message "Saving usage stats..."
 
-	$Now = Get-Date
-	$Now_UTC = Get-Date (Get-Date).ToUniversalTime() -UFormat '+%Y-%m-%dT%H:%M:%S.000Z'
+		$Now = Get-Date
+		$Now_UTC = Get-Date (Get-Date).ToUniversalTime() -UFormat '+%Y-%m-%dT%H:%M:%S.000Z'
 
-	# Get all the computers and users first and query them in powershell to reduce db usage. This is MUCH cheaper than querying as we go!
-	$Query = "SELECT * FROM Computers c"
-	$ExistingComputers = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Computers" -Query $Query -PartitionKey 'computer'
-	$Query = "SELECT * FROM Users u"
-	$ExistingUsers = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Users" -Query $Query -PartitionKey 'user'
+		# Get all the computers and users first and query them in powershell to reduce db usage. This is MUCH cheaper than querying as we go!
+		$Query = "SELECT * FROM Computers c"
+		$ExistingComputers = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Computers" -Query $Query -PartitionKey 'computer'
+		$Query = "SELECT * FROM Users u"
+		$ExistingUsers = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Users" -Query $Query -PartitionKey 'user'
 
-	# We will also only add a usage entry if one has not already been added today
-	$Year_Month = Get-Date -Format 'yyyy-MM'
-	$Query = "SELECT * FROM Usage u WHERE u.UseDateTime >= '$(Get-Date -UFormat '+%Y-%m-%dT00:00:00.000Z')'"
-	$ExistingUsageToday = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Usage" -Query $Query -PartitionKey $Year_Month
+		# We will also only add a usage entry if one has not already been added today
+		$Year_Month = Get-Date -Format 'yyyy-MM'
+		$Query = "SELECT * FROM Usage u WHERE u.UseDateTime >= '$(Get-Date -UFormat '+%Y-%m-%dT00:00:00.000Z')'"
+		$ExistingUsageToday = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Usage" -Query $Query -PartitionKey $Year_Month
 
-	foreach ($Device in $MatchedDevices) {
-		$ActivityComparison = $Device.activity_comparison
-		$Activity = $ActivityComparison.Values | Sort-Object last_active
+		foreach ($Device in $MatchedDevices) {
+			$ActivityComparison = $Device.activity_comparison
+			$Activity = $ActivityComparison.Values | Sort-Object last_active
 
-		if (($Activity | Measure-Object).count -gt 0) {
-			$NewestDate = [DateTime]($Activity.last_active | Sort-Object | Select-Object -Last 1)
-			$Timespan = New-TimeSpan -Start $NewestDate -End $Now
+			if (($Activity | Measure-Object).count -gt 0) {
+				$NewestDate = [DateTime]($Activity.last_active | Sort-Object | Select-Object -Last 1)
+				$Timespan = New-TimeSpan -Start $NewestDate -End $Now
 
-			if ($Timespan.TotalHours -gt 6) {
-				# The device has not been seen in the last 6 hours, lets just skip it
-				continue;
-			}
-
-			$LastActive = $NewestDate;
-			$SCDevices = @()
-			foreach ($DeviceID in $Device.sc_matches) {
-				$SCDevices += $SC_DevicesHash[$DeviceID]
-			}
-
-			# If this device exists in SC, lets make sure it was also recently logged into (not just on)
-			$SCLastActive = ($SCDevices | Sort-Object -Property GuestLastActivityTime | Select-Object -Last 1).GuestLastActivityTime
-			if ($SCLastActive -and (New-TimeSpan -Start $SCLastActive -End $Now).TotalHours -gt 6) { 
-				# online but not logged in, skip it
-				continue;
-			} elseif ($SCLastActive) {
-				# replace $LastActive with the last active time
-				$LastActive = $SCLastActive
-			}
-
-			$RMMDevices = @()
-			foreach ($DeviceID in $Device.rmm_matches) {
-				$RMMDevices += $RMM_DevicesHash[$DeviceID]
-			}
-
-			if (!$SCDevices -and !$RMMDevices) {
-				# Lets ignore anything that's only in sophos, we can't match those securely enough for this
-				continue;
-			}
-
-			# The device has been recently seen and logged into (can only tell if it was recently logged into if the device is in SC)
-			$Hostname = $false
-			$Username = $false
-			$Domain = $false
-			$DeviceType = $false
-			$OperatingSystem = $false
-			$Manufacturer = $false
-			$Model = $false
-			$WarrantyExpiry = $false
-
-			if ($RMMDevices) {
-				$RMMDevice = $RMMDevices | Sort-Object -Property "Last Seen" | Select-Object -Last 1
-				$Hostname = $RMMDevice."Device Hostname"
-				$DeviceType = $RMMDevice."Device Type"
-				$OperatingSystem = $RMMDevice."Operating System"
-				$Manufacturer = $RMMDevice."Manufacturer"
-				$Model = $RMMDevice."Device Model"
-				$WarrantyExpiry = $RMMDevice."Warranty Expiry"
-
-				if ($RMMDevice."Last User" -like "*\*") {
-					$Username = ($RMMDevice."Last User" -split '\\')[1]
-				} else {
-					$Username = $RMMDevice."Last User"
+				if ($Timespan.TotalHours -gt 6) {
+					# The device has not been seen in the last 6 hours, lets just skip it
+					continue;
 				}
-				$Domain = $RMMDevice.domain
-				if (!$Domain -or $Domain -like $Hostname) {
-					$Domain = $false
-				}
-			}
 
-			if ($SCDevices) {
-				$SCDevice = $SCDevices | Sort-Object -Property GuestLastSeen | Select-Object -Last 1
-				if (!$Hostname) {
-					$Hostname = $SCDevice.Name
+				$LastActive = $NewestDate;
+				$SCDevices = @()
+				foreach ($DeviceID in $Device.sc_matches) {
+					$SCDevices += $SC_DevicesHash[$DeviceID]
 				}
+
+				# If this device exists in SC, lets make sure it was also recently logged into (not just on)
+				$SCLastActive = ($SCDevices | Sort-Object -Property GuestLastActivityTime | Select-Object -Last 1).GuestLastActivityTime
+				if ($SCLastActive -and (New-TimeSpan -Start $SCLastActive -End $Now).TotalHours -gt 6) { 
+					# online but not logged in, skip it
+					continue;
+				} elseif ($SCLastActive) {
+					# replace $LastActive with the last active time
+					$LastActive = $SCLastActive
+				}
+
+				$RMMDevices = @()
+				foreach ($DeviceID in $Device.rmm_matches) {
+					$RMMDevices += $RMM_DevicesHash[$DeviceID]
+				}
+
+				if (!$SCDevices -and !$RMMDevices) {
+					# Lets ignore anything that's only in sophos, we can't match those securely enough for this
+					continue;
+				}
+
+				# The device has been recently seen and logged into (can only tell if it was recently logged into if the device is in SC)
+				$Hostname = $false
+				$Username = $false
+				$Domain = $false
+				$DeviceType = $false
+				$OperatingSystem = $false
+				$Manufacturer = $false
+				$Model = $false
+				$WarrantyExpiry = $false
+
+				if ($RMMDevices) {
+					$RMMDevice = $RMMDevices | Sort-Object -Property "Last Seen" | Select-Object -Last 1
+					$Hostname = $RMMDevice."Device Hostname"
+					$DeviceType = $RMMDevice."Device Type"
+					$OperatingSystem = $RMMDevice."Operating System"
+					$Manufacturer = $RMMDevice."Manufacturer"
+					$Model = $RMMDevice."Device Model"
+					$WarrantyExpiry = $RMMDevice."Warranty Expiry"
+
+					if ($RMMDevice."Last User" -like "*\*") {
+						$Username = ($RMMDevice."Last User" -split '\\')[1]
+					} else {
+						$Username = $RMMDevice."Last User"
+					}
+					$Domain = $RMMDevice.domain
+					if (!$Domain -or $Domain -like $Hostname) {
+						$Domain = $false
+					}
+				}
+
+				if ($SCDevices) {
+					$SCDevice = $SCDevices | Sort-Object -Property GuestLastSeen | Select-Object -Last 1
+					if (!$Hostname) {
+						$Hostname = $SCDevice.Name
+					}
+					if (!$DeviceType) {
+						$DeviceType = $SCDevice.DeviceType
+					}
+					if (!$Username) {
+						$Username = $SCDevice.GuestLoggedOnUserName
+					}
+					if (!$Domain -and $SCDevice.GuestLoggedOnUserDomain -and $SCDevice.GuestLoggedOnUserDomain -notlike $Hostname) {
+						$Domain = $SCDevice.GuestLoggedOnUserDomain
+					}
+					$OperatingSystem = $SCDevice.GuestOperatingSystemName
+					if (!$Manufacturer) {
+						$Manufacturer = $SCDevice.GuestMachineManufacturerName
+					}
+					if (!$Model) {
+						$Model = $SCDevice.GuestMachineModel
+					}
+				}
+
+				if (!$Username -or $Username -in $UsernameBlacklist) {
+					# skip this if it's in the username blacklist
+					continue;
+				}
+
+				$SerialNumbers = @()
+				$SerialNumbers += $SCDevices.GuestMachineSerialNumber
+				$SerialNumbers += $RMMDevices."Serial Number"
+				$SerialNumbers = $SerialNumbers | Where-Object { $_ -notin $IgnoreSerials }
+				$SerialNumbers = $SerialNumbers | Sort-Object -Unique
+
 				if (!$DeviceType) {
-					$DeviceType = $SCDevice.DeviceType
-				}
-				if (!$Username) {
-					$Username = $SCDevice.GuestLoggedOnUserName
-				}
-				if (!$Domain -and $SCDevice.GuestLoggedOnUserDomain -and $SCDevice.GuestLoggedOnUserDomain -notlike $Hostname) {
-					$Domain = $SCDevice.GuestLoggedOnUserDomain
-				}
-				$OperatingSystem = $SCDevice.GuestOperatingSystemName
-				if (!$Manufacturer) {
-					$Manufacturer = $SCDevice.GuestMachineManufacturerName
-				}
-				if (!$Model) {
-					$Model = $SCDevice.GuestMachineModel
-				}
-			}
-
-			if (!$Username -or $Username -in $UsernameBlacklist) {
-				# skip this if it's in the username blacklist
-				continue;
-			}
-
-			$SerialNumbers = @()
-			$SerialNumbers += $SCDevices.GuestMachineSerialNumber
-			$SerialNumbers += $RMMDevices."Serial Number"
-			$SerialNumbers = $SerialNumbers | Where-Object { $_ -notin $IgnoreSerials }
-			$SerialNumbers = $SerialNumbers | Sort-Object -Unique
-
-			if (!$DeviceType) {
-				if ($OperatingSystem -and $OperatingSystem -like "*Server*") {
-					$DeviceType = "Server"
-				} else {
-					$DeviceType = "Workstation"
-				}
-			}
-			
-			if ($DeviceType -eq "Server") {
-				# Skip servers
-				continue;
-			}
-
-			# cleanup data to be more readable
-			if ($Manufacturer) {
-				$Manufacturer = manufacturer_cleanup -Manufacturer $Manufacturer
-			}
-
-			if ($OperatingSystem) {
-				if ($OperatingSystem -like "Microsoft*") {
-					$OperatingSystem = $OperatingSystem -replace " ?(((\d+)\.*)+)$", ""
-				} elseif ($OperatingSystem -like "VMware*") {
-					$OperatingSystem = $OperatingSystem -replace " ?(build\d*) (((\d+)\.*)+)$", ""
-				}
-			}
-
-			if ($WarrantyExpiry) {
-				$WarrantyExpiry = $WarrantyExpiry -replace " UTC$", ""
-				$WarrantyExpiry = ([DateTime]$WarrantyExpiry).ToString("yyyy-MM-ddT00:00:00.000Z")
-			}
-
-			$LastActive = Get-Date $LastActive.ToUniversalTime() -UFormat '+%Y-%m-%dT%H:%M:%S.000Z'
-			$Year_Month = Get-Date $LastActive -Format 'yyyy-MM'
-
-			# Lets see if this computer is already in the database
-			if ($SerialNumbers) {
-				$Computers = $ExistingComputers | Where-Object { $_.SerialNumber -match "\|" + ($SerialNumbers -join "|") + "\|" }
-			} else {
-				$Computers = $ExistingComputers | Where-Object { $_.Hostname -like $Hostname }
-			}
-
-			# Narrow down to 1 computer
-			if (($Computers | Measure-Object).Count -gt 1) {
-				$Computers_Accuracy = $Computers;
-				$Computers_Accuracy | Add-Member -NotePropertyName Accuracy -NotePropertyValue 0
-				foreach ($Computer in $Computers_Accuracy) {
-					$Accuracy = 0;
-					if ($Hostname -like $Computer.Hostname) {
-						$Accuracy++
-					}
-					$Device.sc_matches | ForEach-Object {
-						if ("%|$($_)|%" -like $Computer.SC_ID) {
-							$Accuracy++
-						}
-					}
-					$Device.rmm_matches | ForEach-Object {
-						if ("%|$($_)|%" -like $Computer.RMM_ID) {
-							$Accuracy++
-						}
-					}
-					$Device.sophos_matches | ForEach-Object {
-						if ("%|$($_)|%" -like $Computer.Sophos_ID) {
-							$Accuracy++
-						}
-					}
-					$SerialNumbers | ForEach-Object {
-						if ("%|$($_)|%" -like $Computer.SerialNumber) {
-							$Accuracy++
-						}
-					}
-					if ($Manufacturer -like $Computer.Manufacturer) {
-						$Accuracy++
-					}
-					if ($Model -like $Computer.Model) {
-						$Accuracy++
-					}
-					if ($OperatingSystem -like $Computer.OS) {
-						$Accuracy++
-					}
-					$Computer.Accuracy = $Accuracy
-				}
-
-				$BestComputer = $Computers_Accuracy | Sort-Object -Property Accuracy, LastUpdated -Descending | Select-Object -First 1
-				$Computers = $Computers | Where-Object { $_.id -eq $BestComputer[0].id }
-			}
-
-			$SC_String = "|$($Device.sc_matches -join '|')|"
-			$RMM_String = "|$($Device.rmm_matches -join '|')|"
-			$Sophos_String = "|$($Device.sophos_matches -join '|')|"
-			$ITG_String = "|$($Device.itg_matches -join '|')|"
-			$Autotask_String = "|$($Device.autotask_matches -join '|')|"
-			$SerialNum_String = "|$($SerialNumbers  -join '|')|"
-
-			if (!$Computers) {
-				# No computer found, lets insert it
-				$ComputerID = $([Guid]::NewGuid().ToString())
-				$Computer = @{
-					id = $ComputerID
-					Hostname = $Hostname
-					SC_ID = $SC_String
-					RMM_ID = $RMM_String
-					Sophos_ID = $Sophos_String
-					Autotask_ID = $Autotask_String
-					ITG_ID = $ITG_String
-					DeviceType = $DeviceType
-					SerialNumber = $SerialNum_String
-					Manufacturer = $Manufacturer
-					Model = $Model
-					OS = $OperatingSystem
-					WarrantyExpiry = $WarrantyExpiry
-					LastUpdated = $Now_UTC
-					type = "computer"
-				} | ConvertTo-Json
-				New-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Computers" -DocumentBody $Computer -PartitionKey 'computer' | Out-Null
-			} else {
-				# Computer exists, see if we need to update the details
-				$UpdateRequired = $false
-				$UpdatedComputer = $Computers[0] | Select-Object Id, Hostname, SC_ID, RMM_ID, Sophos_ID, Autotask_ID, ITG_ID, DeviceType, SerialNumber, Manufacturer, Model, OS, WarrantyExpiry, LastUpdated, type
-				if ($Hostname -ne $Computers.Hostname) {
-					$UpdatedComputer.Hostname = $Hostname
-					$UpdateRequired = $true
-				}
-				if ($DeviceType -ne $Computers.DeviceType) {
-					$UpdatedComputer.DeviceType = $DeviceType
-					$UpdateRequired = $true
-				}
-				if ($Manufacturer -ne $Computers.Manufacturer) {
-					$UpdatedComputer.Manufacturer = $Manufacturer
-					$UpdateRequired = $true
-				}
-				if ($Model -ne $Computers.Model) {
-					$UpdatedComputer.Model = $Model
-					$UpdateRequired = $true
-				}
-				if ($OperatingSystem -ne $Computers.OS) {
-					$UpdatedComputer.OS = $OperatingSystem
-					$UpdateRequired = $true
-				}
-				if ($WarrantyExpiry -ne $Computers.WarrantyExpiry) {
-					$UpdatedComputer.WarrantyExpiry = $WarrantyExpiry
-					$UpdateRequired = $true
-				}
-	
-				if ($SC_String -ne $Computers.SC_ID) {
-					$UpdatedComputer.SC_ID = $SC_String
-					$UpdateRequired = $true
-				}
-				if ($RMM_String -ne $Computers.RMM_ID) {
-					$UpdatedComputer.RMM_ID = $RMM_String
-					$UpdateRequired = $true
-				}
-				if ($Sophos_String -ne $Computers.Sophos_ID) {
-					$UpdatedComputer.Sophos_ID = $Sophos_String
-					$UpdateRequired = $true
-				}
-				if (!$Computers.Autotask_ID -or $Autotask_String -ne $Computers.Autotask_ID) {
-					if (!(Get-Member -inputobject $UpdatedComputer -name "Autotask_ID" -Membertype Properties)) {
-						$UpdatedComputer | Add-Member -NotePropertyName Autotask_ID -NotePropertyValue $null
-					}
-					$UpdatedComputer.Autotask_ID = $Autotask_String
-					$UpdateRequired = $true
-				}
-				if (!$Computers.ITG_ID -or $ITG_String -ne $Computers.ITG_ID) {
-					if (!(Get-Member -inputobject $UpdatedComputer -name "ITG_ID" -Membertype Properties)) {
-						$UpdatedComputer | Add-Member -NotePropertyName ITG_ID -NotePropertyValue $null
-					}
-					$UpdatedComputer.ITG_ID = $ITG_String
-					$UpdateRequired = $true
-				}
-				if ($SerialNum_String -ne $Computers.SerialNumber) {
-					$UpdatedComputer.SerialNumber = $SerialNum_String
-					$UpdateRequired = $true
-				}
-	
-				$ComputerID = $Computers[0].Id
-				if ($UpdateRequired) {
-					$UpdatedComputer.LastUpdated = $Now_UTC
-					Set-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Computers" -Id $ComputerID -DocumentBody ($UpdatedComputer | ConvertTo-Json) -PartitionKey 'computer' | Out-Null
-				}
-			}
-
-			# Get the User ID, if not already in DB, add a new user
-			$User = $ExistingUsers | Where-Object { $_.Username -like $Username } | Sort-Object LastUpdated | Select-Object -First 1
-
-			if (!$User) {
-				# Add user
-				$UserID = $([Guid]::NewGuid().ToString())
-				$User = @{
-					id = $UserID
-					Username = $Username
-					DomainOrLocal = if ($Domain -and $Domain -ne "WORKGROUP") { "Domain" } else { "Local" }
-					Domain = $Domain
-					ADUsername = $null
-					O365Email = $null
-					ITG_ID = $null
-					LastUpdated = $Now_UTC
-					type = "user"
-				} | ConvertTo-Json
-				New-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Users" -DocumentBody $User -PartitionKey 'user' | Out-Null
-			} else {
-				# If changing fields, update in user audit as well
-				$User = $User | Select-Object Id, Domain, DomainOrLocal, Username, LastUpdated, type, O365Email, ITG_ID, ADUsername
-				$UserID = $User[0].Id
-				if (!$User.DomainOrLocal) {
-					$User.DomainOrLocal = if ($Domain -and $Domain -ne "WORKGROUP") { "Domain" } else { "Local" }
-					$User.Domain = $Domain
-					$User.LastUpdated = $Now_UTC
-					Set-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Users" -Id $UserID -DocumentBody ($User | ConvertTo-Json) -PartitionKey 'user' | Out-Null
-				}
-			}
-
-			# If a usage entry already exists today, skip adding another
-			if (($ExistingUsageToday | Where-Object { $_.ComputerID -eq $Computers.id -and $_.UserID -eq $User.id } | Measure-Object).Count -gt 1) {
-				continue
-			}
-
-			# Add a usage entry
-			$ID = $([Guid]::NewGuid().ToString())
-			$Usage = @{
-				id = $ID
-				ComputerID = $ComputerID
-				UserID = $UserID
-				UseDateTime = $LastActive
-				yearmonth = $Year_Month
-			} | ConvertTo-Json
-			New-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Usage" -DocumentBody $Usage -PartitionKey $Year_Month | Out-Null
-		}
-	}
-
-	# Create collections for monthly stats if necessary
-	try {
-		Get-CosmosDbCollection -Context $cosmosDbContext -Id "Variables" | Out-Null
-	} catch {
-		try {
-			New-CosmosDbCollection -Context $cosmosDbContext -Database $DB_Name -Id "Variables" -PartitionKey "variable" | Out-Null
-		} catch {
-			Write-PSFMessage -Level Error -Message "Table 'Variables' creation failed. Exiting..."
-			Write-Host "Table 'Variables' creation failed. Exiting..." -ForegroundColor Red
-			exit
-		}
-		Write-Host "Created new table: Variables"
-		Write-PSFMessage -Level Verbose -Message "Created new table: Variables"
-	}
-	try {
-		Get-CosmosDbCollection -Context $cosmosDbContext -Id "ComputerUsage" | Out-Null
-	} catch {
-		try {
-			New-CosmosDbCollection -Context $cosmosDbContext -Database $DB_Name -Id "ComputerUsage" -PartitionKey "id" | Out-Null
-		} catch {
-			Write-PSFMessage -Level Error -Message "Table 'ComputerUsage' creation failed. Exiting..."
-			Write-Host "Table 'ComputerUsage' creation failed. Exiting..." -ForegroundColor Red
-			exit
-		}
-		Write-Host "Created new table: ComputerUsage"
-		Write-PSFMessage -Level Verbose -Message "Created new table: ComputerUsage"
-	}
-	try {
-		Get-CosmosDbCollection -Context $cosmosDbContext -Id "UserUsage" | Out-Null
-	} catch {
-		try {
-			New-CosmosDbCollection -Context $cosmosDbContext -Database $DB_Name -Id "UserUsage" -PartitionKey "id" | Out-Null
-		} catch {
-			Write-PSFMessage -Level Error -Message "Table 'UserUsage' creation failed. Exiting..."
-			Write-Host "Table 'UserUsage' creation failed. Exiting..." -ForegroundColor Red
-			exit
-		}
-		Write-Host "Created new table: UserUsage"
-		Write-PSFMessage -Level Verbose -Message "Created new table: UserUsage"
-	}
-
-	# Get the last time we updated the monthly stats
-	$StatsLastUpdated = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId 'Variables' -Query "SELECT * FROM Variables AS v WHERE v.variable = 'StatsLastUpdated'" -PartitionKey 'StatsLastUpdated'
-
-	# If we last updated the monthly stats sometime before the end of last month, lets update them now
-	# (that means last month hasn't been updated yet), and then update the LastUpdated variable
-	$LastMonth = (Get-Date).AddMonths(-1)
-	$LastDay = [DateTime]::DaysInMonth($LastMonth.Year, $LastMonth.Month)
-	$CheckDate = [DateTime]::new($LastMonth.Year, $LastMonth.Month, $LastDay, 23, 59, 59)
-	if (!$StatsLastUpdated -or ($StatsLastUpdated -and (Get-Date $StatsLastUpdated.LastUpdated) -lt $CheckDate)) {
-		# Get all usage documents
-		$Year_Month = Get-Date (Get-Date).AddMonths(-1) -Format 'yyyy-MM'
-		$Usage = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Usage" -Query "SELECT * FROM Usage AS u WHERE u.yearmonth = '$Year_Month'" -PartitionKey $Year_Month
-
-		# Calculate monthly stats
-		if ($Usage) {
-			# Get all existing monthly stats
-			$ComputerIDs = $Usage.ComputerID | Select-Object -Unique
-			$Query = "SELECT * FROM ComputerUsage AS cu"
-			$Existing_ComputerUsage = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "ComputerUsage" -Query $Query -QueryEnableCrossPartition $true
-			$Existing_ComputerUsage = $Existing_ComputerUsage | Where-Object { $_.Id -in $ComputerIDs }
-
-			$UserIDs = $Usage.UserID | Select-Object -Unique
-			$Query = "SELECT * FROM UserUsage AS uu"
-			$Existing_UserUsage = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "UserUsage" -Query $Query -QueryEnableCrossPartition $true
-			$Existing_UserUsage = $Existing_UserUsage | Where-Object { $_.Id -in $UserIDs }
-
-			# Group all usage stats from this past month by computer, user, and computer/user
-			$Monthly_UsageByComputer = $Usage | Select-Object ComputerID, UserID, UseDateTime, @{Name="Day"; E={ Get-Date $_.UseDateTime -Format 'dd' }} | Group-Object -Property ComputerID
-			$Monthly_UsageByUser = $Usage | Select-Object UserID, ComputerID, UseDateTime, @{Name="Day"; E={ Get-Date $_.UseDateTime -Format 'dd' }} | Group-Object -Property UserID
-			$Monthly_UsageByComputerUser = $Usage | Select-Object ComputerID, UserID, UseDateTime, @{Name="Day"; E={ Get-Date $_.UseDateTime -Format 'dd' }} | Group-Object -Property ComputerID, UserID
-			$Monthly_OutOfDays = ($Usage | Select-Object @{Name="Day"; E={ Get-Date $_.UseDateTime -Format 'dd' }} | Select-Object -ExpandProperty Day | Sort-Object -Unique | Measure-Object).Count
-
-			# Build the monthly stats for each computer
-			$Updated_ComputerUsage = @()
-			foreach ($ComputerID in $ComputerIDs) {
-				$ExistingEntry = $Existing_ComputerUsage | Where-Object { $_.id -eq $ComputerID }
-
-				if ($ExistingEntry) {
-					$New_UsageHistory = $ExistingEntry | Select-Object id, DaysActive, LastActive, UsersUsedBy
-				} else {
-					$New_UsageHistory = @{
-						id = $ComputerID
-						DaysActive = @{
-							Total = 0
-							LastMonth = 0
-							LastMonthPercent = 0
-							History = @{}
-							HistoryPercent = @{}
-						}
-						LastActive = $null
-						UsersUsedBy = @()
-					}
-				}
-
-				$MonthsUsage = $Monthly_UsageByComputer | Where-Object { $_.Name -eq $ComputerID }
-				$DaysActive = ($MonthsUsage.Group | Select-Object Day | Select-Object -ExpandProperty Day | Sort-Object -Unique | Measure-Object).Count
-				$DaysActivePercent = [Math]::Round($DaysActive / $Monthly_OutOfDays * 100)
-
-				$New_UsageHistory.DaysActive.Total += $DaysActive
-				$New_UsageHistory.DaysActive.LastMonth = $DaysActive
-				$New_UsageHistory.DaysActive.LastMonthPercent = $DaysActivePercent
-				if ($New_UsageHistory.DaysActive.History -is 'PSCustomObject') {
-					$New_UsageHistory.DaysActive.History | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
-					$New_UsageHistory.DaysActive.HistoryPercent | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
-					$New_UsageHistory.DaysActive.History.$Year_Month = $DaysActive
-					$New_UsageHistory.DaysActive.HistoryPercent.$Year_Month = $DaysActivePercent
-				} else {
-					$New_UsageHistory.DaysActive.History[$Year_Month] = $DaysActive
-					$New_UsageHistory.DaysActive.HistoryPercent[$Year_Month] = $DaysActivePercent
-				}
-				$New_UsageHistory.LastActive = ($MonthsUsage.Group | Sort-Object { $_.UseDateTime -as [DateTime] } -Descending | Select-Object -First 1).UseDateTime
-				$New_UsageHistory.UsersUsedBy | Foreach-Object {
-					$_.DaysActive.LastMonth = 0
-					$_.DaysActive.LastMonthPercent = 0
-				}
-
-				# Update the UsersUsedBy array with usage stats for this computer on a per-user basis
-				$MonthsUsageByUser = $Monthly_UsageByComputerUser | Where-Object { $_.Name -like "*$ComputerID*" }
-				$Existing_UsersUsedBy = [Collections.Generic.List[Object]]$New_UsageHistory.UsersUsedBy
-				foreach ($User in $MonthsUsageByUser) {
-					$UserID = $User.Group[0].UserID
-					$DaysActive = ($User.Group | Select-Object Day | Select-Object -ExpandProperty Day | Sort-Object -Unique | Measure-Object).Count
-					$DaysActivePercent = [Math]::Round($DaysActive / $Monthly_OutOfDays * 100)
-
-					$ExistingIndex = $Existing_UsersUsedBy.FindIndex( {$args[0].id -eq $UserID } )
-					if ($ExistingIndex -ge 0) {
-						$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.Total += $DaysActive
-						$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.LastMonth = $DaysActive
-						$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.LastMonthPercent = $DaysActivePercent
-						if ($New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.History -is 'PSCustomObject') {
-							$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.History | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
-							$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.HistoryPercent | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
-							$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.History.$Year_Month = $DaysActive
-							$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.HistoryPercent.$Year_Month = $DaysActivePercent
-						} else {
-							$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.History[$Year_Month] = $DaysActive
-							$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.HistoryPercent[$Year_Month] = $DaysActivePercent
-						}
-						$New_UsageHistory.UsersUsedBy[$ExistingIndex].LastActive = ($MonthsUsageByUser.Group | Sort-Object { $_.UseDateTime -as [DateTime] } -Descending | Select-Object -First 1).UseDateTime
+					if ($OperatingSystem -and $OperatingSystem -like "*Server*") {
+						$DeviceType = "Server"
 					} else {
-						$New_UsageHistory.UsersUsedBy += @{
-							id = $UserID
-							DaysActive = @{
-								Total = $DaysActive
-								LastMonth = $DaysActive
-								LastMonthPercent = $DaysActivePercent
-								History = @{
-									$Year_Month = $DaysActive
-								}
-								HistoryPercent = @{
-									$Year_Month = $DaysActivePercent
-								}
+						$DeviceType = "Workstation"
+					}
+				}
+				
+				if ($DeviceType -eq "Server") {
+					# Skip servers
+					continue;
+				}
+
+				# cleanup data to be more readable
+				if ($Manufacturer) {
+					$Manufacturer = manufacturer_cleanup -Manufacturer $Manufacturer
+				}
+
+				if ($OperatingSystem) {
+					if ($OperatingSystem -like "Microsoft*") {
+						$OperatingSystem = $OperatingSystem -replace " ?(((\d+)\.*)+)$", ""
+					} elseif ($OperatingSystem -like "VMware*") {
+						$OperatingSystem = $OperatingSystem -replace " ?(build\d*) (((\d+)\.*)+)$", ""
+					}
+				}
+
+				if ($WarrantyExpiry) {
+					$WarrantyExpiry = $WarrantyExpiry -replace " UTC$", ""
+					$WarrantyExpiry = ([DateTime]$WarrantyExpiry).ToString("yyyy-MM-ddT00:00:00.000Z")
+				}
+
+				$LastActive = Get-Date $LastActive.ToUniversalTime() -UFormat '+%Y-%m-%dT%H:%M:%S.000Z'
+				$Year_Month = Get-Date $LastActive -Format 'yyyy-MM'
+
+				# Lets see if this computer is already in the database
+				if ($SerialNumbers) {
+					$Computers = $ExistingComputers | Where-Object { $_.SerialNumber -match "\|" + ($SerialNumbers -join "|") + "\|" }
+				} else {
+					$Computers = $ExistingComputers | Where-Object { $_.Hostname -like $Hostname }
+				}
+
+				# Narrow down to 1 computer
+				if (($Computers | Measure-Object).Count -gt 1) {
+					$Computers_Accuracy = $Computers;
+					$Computers_Accuracy | Add-Member -NotePropertyName Accuracy -NotePropertyValue 0
+					foreach ($Computer in $Computers_Accuracy) {
+						$Accuracy = 0;
+						if ($Hostname -like $Computer.Hostname) {
+							$Accuracy++
+						}
+						$Device.sc_matches | ForEach-Object {
+							if ("%|$($_)|%" -like $Computer.SC_ID) {
+								$Accuracy++
 							}
-							LastActive = ($MonthsUsageByUser.Group | Sort-Object { $_.UseDateTime -as [DateTime] } -Descending | Select-Object -First 1).UseDateTime
 						}
+						$Device.rmm_matches | ForEach-Object {
+							if ("%|$($_)|%" -like $Computer.RMM_ID) {
+								$Accuracy++
+							}
+						}
+						$Device.sophos_matches | ForEach-Object {
+							if ("%|$($_)|%" -like $Computer.Sophos_ID) {
+								$Accuracy++
+							}
+						}
+						$SerialNumbers | ForEach-Object {
+							if ("%|$($_)|%" -like $Computer.SerialNumber) {
+								$Accuracy++
+							}
+						}
+						if ($Manufacturer -like $Computer.Manufacturer) {
+							$Accuracy++
+						}
+						if ($Model -like $Computer.Model) {
+							$Accuracy++
+						}
+						if ($OperatingSystem -like $Computer.OS) {
+							$Accuracy++
+						}
+						$Computer.Accuracy = $Accuracy
+					}
+
+					$BestComputer = $Computers_Accuracy | Sort-Object -Property Accuracy, LastUpdated -Descending | Select-Object -First 1
+					$Computers = $Computers | Where-Object { $_.id -eq $BestComputer[0].id }
+				}
+
+				$SC_String = "|$($Device.sc_matches -join '|')|"
+				$RMM_String = "|$($Device.rmm_matches -join '|')|"
+				$Sophos_String = "|$($Device.sophos_matches -join '|')|"
+				$ITG_String = "|$($Device.itg_matches -join '|')|"
+				$Autotask_String = "|$($Device.autotask_matches -join '|')|"
+				$SerialNum_String = "|$($SerialNumbers  -join '|')|"
+
+				if (!$Computers) {
+					# No computer found, lets insert it
+					$ComputerID = $([Guid]::NewGuid().ToString())
+					$Computer = @{
+						id = $ComputerID
+						Hostname = $Hostname
+						SC_ID = $SC_String
+						RMM_ID = $RMM_String
+						Sophos_ID = $Sophos_String
+						Autotask_ID = $Autotask_String
+						ITG_ID = $ITG_String
+						DeviceType = $DeviceType
+						SerialNumber = $SerialNum_String
+						Manufacturer = $Manufacturer
+						Model = $Model
+						OS = $OperatingSystem
+						WarrantyExpiry = $WarrantyExpiry
+						LastUpdated = $Now_UTC
+						type = "computer"
+					} | ConvertTo-Json
+					New-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Computers" -DocumentBody $Computer -PartitionKey 'computer' | Out-Null
+				} else {
+					# Computer exists, see if we need to update the details
+					$UpdateRequired = $false
+					$UpdatedComputer = $Computers[0] | Select-Object Id, Hostname, SC_ID, RMM_ID, Sophos_ID, Autotask_ID, ITG_ID, DeviceType, SerialNumber, Manufacturer, Model, OS, WarrantyExpiry, LastUpdated, type
+					if ($Hostname -ne $Computers.Hostname) {
+						$UpdatedComputer.Hostname = $Hostname
+						$UpdateRequired = $true
+					}
+					if ($DeviceType -ne $Computers.DeviceType) {
+						$UpdatedComputer.DeviceType = $DeviceType
+						$UpdateRequired = $true
+					}
+					if ($Manufacturer -ne $Computers.Manufacturer) {
+						$UpdatedComputer.Manufacturer = $Manufacturer
+						$UpdateRequired = $true
+					}
+					if ($Model -ne $Computers.Model) {
+						$UpdatedComputer.Model = $Model
+						$UpdateRequired = $true
+					}
+					if ($OperatingSystem -ne $Computers.OS) {
+						$UpdatedComputer.OS = $OperatingSystem
+						$UpdateRequired = $true
+					}
+					if ($WarrantyExpiry -ne $Computers.WarrantyExpiry) {
+						$UpdatedComputer.WarrantyExpiry = $WarrantyExpiry
+						$UpdateRequired = $true
+					}
+		
+					if ($SC_String -ne $Computers.SC_ID) {
+						$UpdatedComputer.SC_ID = $SC_String
+						$UpdateRequired = $true
+					}
+					if ($RMM_String -ne $Computers.RMM_ID) {
+						$UpdatedComputer.RMM_ID = $RMM_String
+						$UpdateRequired = $true
+					}
+					if ($Sophos_String -ne $Computers.Sophos_ID) {
+						$UpdatedComputer.Sophos_ID = $Sophos_String
+						$UpdateRequired = $true
+					}
+					if (!$Computers.Autotask_ID -or $Autotask_String -ne $Computers.Autotask_ID) {
+						if (!(Get-Member -inputobject $UpdatedComputer -name "Autotask_ID" -Membertype Properties)) {
+							$UpdatedComputer | Add-Member -NotePropertyName Autotask_ID -NotePropertyValue $null
+						}
+						$UpdatedComputer.Autotask_ID = $Autotask_String
+						$UpdateRequired = $true
+					}
+					if (!$Computers.ITG_ID -or $ITG_String -ne $Computers.ITG_ID) {
+						if (!(Get-Member -inputobject $UpdatedComputer -name "ITG_ID" -Membertype Properties)) {
+							$UpdatedComputer | Add-Member -NotePropertyName ITG_ID -NotePropertyValue $null
+						}
+						$UpdatedComputer.ITG_ID = $ITG_String
+						$UpdateRequired = $true
+					}
+					if ($SerialNum_String -ne $Computers.SerialNumber) {
+						$UpdatedComputer.SerialNumber = $SerialNum_String
+						$UpdateRequired = $true
+					}
+		
+					$ComputerID = $Computers[0].Id
+					if ($UpdateRequired) {
+						$UpdatedComputer.LastUpdated = $Now_UTC
+						Set-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Computers" -Id $ComputerID -DocumentBody ($UpdatedComputer | ConvertTo-Json) -PartitionKey 'computer' | Out-Null
 					}
 				}
 
-				$Updated_ComputerUsage += $New_UsageHistory
-			}
+				# Get the User ID, if not already in DB, add a new user
+				$User = $ExistingUsers | Where-Object { $_.Username -like $Username } | Sort-Object LastUpdated | Select-Object -First 1
 
-			# Update the DB with the new monthly computer usage stats
-			foreach ($Updated_Usage in $Updated_ComputerUsage) {
-				if ($Updated_Usage.id -in $Existing_ComputerUsage.id) {
-					# update
-					Set-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "ComputerUsage" -Id $Updated_Usage.id -DocumentBody ($Updated_Usage | ConvertTo-Json -Depth 10) -PartitionKey $Updated_Usage.id | Out-Null
-				} else {
-					# new
-					New-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "ComputerUsage" -DocumentBody ($Updated_Usage | ConvertTo-Json -Depth 10) -PartitionKey $Updated_Usage.id | Out-Null
-				}
-			}
-
-			# Build the monthly stats for each user
-			$Updated_UserUsage = @()
-			foreach ($UserID in $UserIDs) {
-				$ExistingEntry = $Existing_UserUsage | Where-Object { $_.id -eq $UserID }
-
-				if ($ExistingEntry) {
-					$New_UsageHistory = $ExistingEntry | Select-Object id, DaysActive, LastActive, ComputersUsed
-				} else {
-					$New_UsageHistory = @{
+				if (!$User) {
+					# Add user
+					$UserID = $([Guid]::NewGuid().ToString())
+					$User = @{
 						id = $UserID
-						DaysActive = @{
-							Total = 0
-							LastMonth = 0
-							LastMonthPercent = 0
-							History = @{}
-							HistoryPercent = @{}
-						}
-						LastActive = $null
-						ComputersUsed = @()
+						Username = $Username
+						DomainOrLocal = if ($Domain -and $Domain -ne "WORKGROUP") { "Domain" } else { "Local" }
+						Domain = $Domain
+						ADUsername = $null
+						O365Email = $null
+						ITG_ID = $null
+						LastUpdated = $Now_UTC
+						type = "user"
+					} | ConvertTo-Json
+					New-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Users" -DocumentBody $User -PartitionKey 'user' | Out-Null
+				} else {
+					# If changing fields, update in user audit as well
+					$User = $User | Select-Object Id, Domain, DomainOrLocal, Username, LastUpdated, type, O365Email, ITG_ID, ADUsername
+					$UserID = $User[0].Id
+					if (!$User.DomainOrLocal) {
+						$User.DomainOrLocal = if ($Domain -and $Domain -ne "WORKGROUP") { "Domain" } else { "Local" }
+						$User.Domain = $Domain
+						$User.LastUpdated = $Now_UTC
+						Set-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Users" -Id $UserID -DocumentBody ($User | ConvertTo-Json) -PartitionKey 'user' | Out-Null
 					}
 				}
 
-				$MonthsUsage = $Monthly_UsageByUser | Where-Object { $_.Name -eq $UserID }
-				$DaysActive = ($MonthsUsage.Group | Select-Object Day | Select-Object -ExpandProperty Day | Sort-Object -Unique | Measure-Object).Count
-				$DaysActivePercent = [Math]::Round($DaysActive / $Monthly_OutOfDays * 100)
-
-				$New_UsageHistory.DaysActive.Total += $DaysActive
-				$New_UsageHistory.DaysActive.LastMonth = $DaysActive
-				$New_UsageHistory.DaysActive.LastMonthPercent = $DaysActivePercent
-				if ($New_UsageHistory.DaysActive.History -is 'PSCustomObject') {
-					$New_UsageHistory.DaysActive.History | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
-					$New_UsageHistory.DaysActive.HistoryPercent | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
-					$New_UsageHistory.DaysActive.History.$Year_Month = $DaysActive
-					$New_UsageHistory.DaysActive.HistoryPercent.$Year_Month = $DaysActivePercent
-				} else {
-					$New_UsageHistory.DaysActive.History[$Year_Month] = $DaysActive
-					$New_UsageHistory.DaysActive.HistoryPercent[$Year_Month] = $DaysActivePercent
-				}
-				$New_UsageHistory.LastActive = ($MonthsUsage.Group | Sort-Object { $_.UseDateTime -as [DateTime] } -Descending | Select-Object -First 1).UseDateTime
-				$New_UsageHistory.ComputersUsed | Foreach-Object {
-					$_.DaysActive.LastMonth = 0
-					$_.DaysActive.LastMonthPercent = 0
+				# If a usage entry already exists today, skip adding another
+				if (($ExistingUsageToday | Where-Object { $_.ComputerID -eq $Computers.id -and $_.UserID -eq $User.id } | Measure-Object).Count -gt 1) {
+					continue
 				}
 
-				# Update the ComputersUsed array with usage stats for this user on a per-computer basis
-				$MonthsUsageByComputer = $Monthly_UsageByComputerUser | Where-Object { $_.Name -like "*$UserID*" }
-				$Existing_ComputersUsed = [Collections.Generic.List[Object]]$New_UsageHistory.ComputersUsed
-				foreach ($Computer in $MonthsUsageByComputer) {
-					$ComputerID = $Computer.Group[0].ComputerID
-					$DaysActive = ($Computer.Group | Select-Object Day | Select-Object -ExpandProperty Day | Sort-Object -Unique | Measure-Object).Count
-					$DaysActivePercent = [Math]::Round($DaysActive / $Monthly_OutOfDays * 100)
+				# Add a usage entry
+				$ID = $([Guid]::NewGuid().ToString())
+				$Usage = @{
+					id = $ID
+					ComputerID = $ComputerID
+					UserID = $UserID
+					UseDateTime = $LastActive
+					yearmonth = $Year_Month
+				} | ConvertTo-Json
+				New-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Usage" -DocumentBody $Usage -PartitionKey $Year_Month | Out-Null
+			}
+		}
 
-					$ExistingIndex = $Existing_ComputersUsed.FindIndex( {$args[0].id -eq $ComputerID } )
-					if ($ExistingIndex -ge 0) {
-						$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.Total += $DaysActive
-						$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.LastMonth = $DaysActive
-						$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.LastMonthPercent = $DaysActivePercent
-						if ($New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.History -is 'PSCustomObject') {
-							$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.History | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
-							$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.HistoryPercent | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
-							$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.History.$Year_Month = $DaysActive
-							$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.HistoryPercent.$Year_Month = $DaysActivePercent
-						} else {
-							$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.History[$Year_Month] = $DaysActive
-							$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.HistoryPercent[$Year_Month] = $DaysActivePercent
-						}
-						$New_UsageHistory.ComputersUsed[$ExistingIndex].LastActive = ($MonthsUsageByComputer.Group | Sort-Object { $_.UseDateTime -as [DateTime] } -Descending | Select-Object -First 1).UseDateTime
+		# Create collections for monthly stats if necessary
+		try {
+			Get-CosmosDbCollection -Context $cosmosDbContext -Id "Variables" | Out-Null
+		} catch {
+			try {
+				if (!$cosmosDbContext_management) {
+					$cosmosDbContext_management = New-CosmosDbContext -Account $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup -MasterKeyType PrimaryMasterKey -BackoffPolicy $backoffPolicy
+				}
+				New-CosmosDbCollection -Context $cosmosDbContext_management -Database $DB_Name -Id "Variables" -PartitionKey "variable" | Out-Null
+			} catch {
+				Write-PSFMessage -Level Error -Message "Table 'Variables' creation failed. Exiting..."
+				Write-Host "Table 'Variables' creation failed. Exiting..." -ForegroundColor Red
+				break continueDBOperations
+			}
+			Write-Host "Created new table: Variables"
+			Write-PSFMessage -Level Verbose -Message "Created new table: Variables"
+		}
+		try {
+			Get-CosmosDbCollection -Context $cosmosDbContext -Id "ComputerUsage" | Out-Null
+		} catch {
+			try {
+				if (!$cosmosDbContext_management) {
+					$cosmosDbContext_management = New-CosmosDbContext -Account $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup -MasterKeyType PrimaryMasterKey -BackoffPolicy $backoffPolicy
+				}
+				New-CosmosDbCollection -Context $cosmosDbContext_management -Database $DB_Name -Id "ComputerUsage" -PartitionKey "id" | Out-Null
+			} catch {
+				Write-PSFMessage -Level Error -Message "Table 'ComputerUsage' creation failed. Exiting..."
+				Write-Host "Table 'ComputerUsage' creation failed. Exiting..." -ForegroundColor Red
+				break continueDBOperations
+			}
+			Write-Host "Created new table: ComputerUsage"
+			Write-PSFMessage -Level Verbose -Message "Created new table: ComputerUsage"
+		}
+		try {
+			Get-CosmosDbCollection -Context $cosmosDbContext -Id "UserUsage" | Out-Null
+		} catch {
+			try {
+				if (!$cosmosDbContext_management) {
+					$cosmosDbContext_management = New-CosmosDbContext -Account $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup -MasterKeyType PrimaryMasterKey -BackoffPolicy $backoffPolicy
+				}
+				New-CosmosDbCollection -Context $cosmosDbContext_management -Database $DB_Name -Id "UserUsage" -PartitionKey "id" | Out-Null
+			} catch {
+				Write-PSFMessage -Level Error -Message "Table 'UserUsage' creation failed. Exiting..."
+				Write-Host "Table 'UserUsage' creation failed. Exiting..." -ForegroundColor Red
+				break continueDBOperations
+			}
+			Write-Host "Created new table: UserUsage"
+			Write-PSFMessage -Level Verbose -Message "Created new table: UserUsage"
+		}
+
+		# Get the last time we updated the monthly stats
+		$StatsLastUpdated = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId 'Variables' -Query "SELECT * FROM Variables AS v WHERE v.variable = 'StatsLastUpdated'" -PartitionKey 'StatsLastUpdated'
+
+		# If we last updated the monthly stats sometime before the end of last month, lets update them now
+		# (that means last month hasn't been updated yet), and then update the LastUpdated variable
+		$LastMonth = (Get-Date).AddMonths(-1)
+		$LastDay = [DateTime]::DaysInMonth($LastMonth.Year, $LastMonth.Month)
+		$CheckDate = [DateTime]::new($LastMonth.Year, $LastMonth.Month, $LastDay, 23, 59, 59)
+		if (!$StatsLastUpdated -or ($StatsLastUpdated -and (Get-Date $StatsLastUpdated.LastUpdated) -lt $CheckDate)) {
+			# Get all usage documents
+			$Year_Month = Get-Date (Get-Date).AddMonths(-1) -Format 'yyyy-MM'
+			$Usage = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Usage" -Query "SELECT * FROM Usage AS u WHERE u.yearmonth = '$Year_Month'" -PartitionKey $Year_Month
+
+			# Calculate monthly stats
+			if ($Usage) {
+				# Get all existing monthly stats
+				$ComputerIDs = $Usage.ComputerID | Select-Object -Unique
+				$Query = "SELECT * FROM ComputerUsage AS cu"
+				$Existing_ComputerUsage = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "ComputerUsage" -Query $Query -QueryEnableCrossPartition $true
+				$Existing_ComputerUsage = $Existing_ComputerUsage | Where-Object { $_.Id -in $ComputerIDs }
+
+				$UserIDs = $Usage.UserID | Select-Object -Unique
+				$Query = "SELECT * FROM UserUsage AS uu"
+				$Existing_UserUsage = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "UserUsage" -Query $Query -QueryEnableCrossPartition $true
+				$Existing_UserUsage = $Existing_UserUsage | Where-Object { $_.Id -in $UserIDs }
+
+				# Group all usage stats from this past month by computer, user, and computer/user
+				$Monthly_UsageByComputer = $Usage | Select-Object ComputerID, UserID, UseDateTime, @{Name="Day"; E={ Get-Date $_.UseDateTime -Format 'dd' }} | Group-Object -Property ComputerID
+				$Monthly_UsageByUser = $Usage | Select-Object UserID, ComputerID, UseDateTime, @{Name="Day"; E={ Get-Date $_.UseDateTime -Format 'dd' }} | Group-Object -Property UserID
+				$Monthly_UsageByComputerUser = $Usage | Select-Object ComputerID, UserID, UseDateTime, @{Name="Day"; E={ Get-Date $_.UseDateTime -Format 'dd' }} | Group-Object -Property ComputerID, UserID
+				$Monthly_OutOfDays = ($Usage | Select-Object @{Name="Day"; E={ Get-Date $_.UseDateTime -Format 'dd' }} | Select-Object -ExpandProperty Day | Sort-Object -Unique | Measure-Object).Count
+
+				# Build the monthly stats for each computer
+				$Updated_ComputerUsage = @()
+				foreach ($ComputerID in $ComputerIDs) {
+					$ExistingEntry = $Existing_ComputerUsage | Where-Object { $_.id -eq $ComputerID }
+
+					if ($ExistingEntry) {
+						$New_UsageHistory = $ExistingEntry | Select-Object id, DaysActive, LastActive, UsersUsedBy
 					} else {
-						$New_UsageHistory.ComputersUsed += @{
+						$New_UsageHistory = @{
 							id = $ComputerID
 							DaysActive = @{
-								Total = $DaysActive
-								LastMonth = $DaysActive
-								LastMonthPercent = $DaysActivePercent
-								History = @{
-									$Year_Month = $DaysActive
-								}
-								HistoryPercent = @{
-									$Year_Month = $DaysActivePercent
-								}
+								Total = 0
+								LastMonth = 0
+								LastMonthPercent = 0
+								History = @{}
+								HistoryPercent = @{}
 							}
-							LastActive = ($MonthsUsageByComputer.Group | Sort-Object { $_.UseDateTime -as [DateTime] } -Descending | Select-Object -First 1).UseDateTime
+							LastActive = $null
+							UsersUsedBy = @()
 						}
+					}
+
+					$MonthsUsage = $Monthly_UsageByComputer | Where-Object { $_.Name -eq $ComputerID }
+					$DaysActive = ($MonthsUsage.Group | Select-Object Day | Select-Object -ExpandProperty Day | Sort-Object -Unique | Measure-Object).Count
+					$DaysActivePercent = [Math]::Round($DaysActive / $Monthly_OutOfDays * 100)
+
+					$New_UsageHistory.DaysActive.Total += $DaysActive
+					$New_UsageHistory.DaysActive.LastMonth = $DaysActive
+					$New_UsageHistory.DaysActive.LastMonthPercent = $DaysActivePercent
+					if ($New_UsageHistory.DaysActive.History -is 'PSCustomObject') {
+						$New_UsageHistory.DaysActive.History | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
+						$New_UsageHistory.DaysActive.HistoryPercent | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
+						$New_UsageHistory.DaysActive.History.$Year_Month = $DaysActive
+						$New_UsageHistory.DaysActive.HistoryPercent.$Year_Month = $DaysActivePercent
+					} else {
+						$New_UsageHistory.DaysActive.History[$Year_Month] = $DaysActive
+						$New_UsageHistory.DaysActive.HistoryPercent[$Year_Month] = $DaysActivePercent
+					}
+					$New_UsageHistory.LastActive = ($MonthsUsage.Group | Sort-Object { $_.UseDateTime -as [DateTime] } -Descending | Select-Object -First 1).UseDateTime
+					$New_UsageHistory.UsersUsedBy | Foreach-Object {
+						$_.DaysActive.LastMonth = 0
+						$_.DaysActive.LastMonthPercent = 0
+					}
+
+					# Update the UsersUsedBy array with usage stats for this computer on a per-user basis
+					$MonthsUsageByUser = $Monthly_UsageByComputerUser | Where-Object { $_.Name -like "*$ComputerID*" }
+					$Existing_UsersUsedBy = [Collections.Generic.List[Object]]$New_UsageHistory.UsersUsedBy
+					foreach ($User in $MonthsUsageByUser) {
+						$UserID = $User.Group[0].UserID
+						$DaysActive = ($User.Group | Select-Object Day | Select-Object -ExpandProperty Day | Sort-Object -Unique | Measure-Object).Count
+						$DaysActivePercent = [Math]::Round($DaysActive / $Monthly_OutOfDays * 100)
+
+						$ExistingIndex = $Existing_UsersUsedBy.FindIndex( {$args[0].id -eq $UserID } )
+						if ($ExistingIndex -ge 0) {
+							$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.Total += $DaysActive
+							$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.LastMonth = $DaysActive
+							$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.LastMonthPercent = $DaysActivePercent
+							if ($New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.History -is 'PSCustomObject') {
+								$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.History | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
+								$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.HistoryPercent | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
+								$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.History.$Year_Month = $DaysActive
+								$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.HistoryPercent.$Year_Month = $DaysActivePercent
+							} else {
+								$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.History[$Year_Month] = $DaysActive
+								$New_UsageHistory.UsersUsedBy[$ExistingIndex].DaysActive.HistoryPercent[$Year_Month] = $DaysActivePercent
+							}
+							$New_UsageHistory.UsersUsedBy[$ExistingIndex].LastActive = ($MonthsUsageByUser.Group | Sort-Object { $_.UseDateTime -as [DateTime] } -Descending | Select-Object -First 1).UseDateTime
+						} else {
+							$New_UsageHistory.UsersUsedBy += @{
+								id = $UserID
+								DaysActive = @{
+									Total = $DaysActive
+									LastMonth = $DaysActive
+									LastMonthPercent = $DaysActivePercent
+									History = @{
+										$Year_Month = $DaysActive
+									}
+									HistoryPercent = @{
+										$Year_Month = $DaysActivePercent
+									}
+								}
+								LastActive = ($MonthsUsageByUser.Group | Sort-Object { $_.UseDateTime -as [DateTime] } -Descending | Select-Object -First 1).UseDateTime
+							}
+						}
+					}
+
+					$Updated_ComputerUsage += $New_UsageHistory
+				}
+
+				# Update the DB with the new monthly computer usage stats
+				foreach ($Updated_Usage in $Updated_ComputerUsage) {
+					if ($Updated_Usage.id -in $Existing_ComputerUsage.id) {
+						# update
+						Set-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "ComputerUsage" -Id $Updated_Usage.id -DocumentBody ($Updated_Usage | ConvertTo-Json -Depth 10) -PartitionKey $Updated_Usage.id | Out-Null
+					} else {
+						# new
+						New-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "ComputerUsage" -DocumentBody ($Updated_Usage | ConvertTo-Json -Depth 10) -PartitionKey $Updated_Usage.id | Out-Null
 					}
 				}
 
-				$Updated_UserUsage += $New_UsageHistory
-			}
+				# Build the monthly stats for each user
+				$Updated_UserUsage = @()
+				foreach ($UserID in $UserIDs) {
+					$ExistingEntry = $Existing_UserUsage | Where-Object { $_.id -eq $UserID }
 
-			# Update the DB with the new monthly user usage stats
-			foreach ($Updated_Usage in $Updated_UserUsage) {
-				if ($Updated_Usage.id -in $Existing_UserUsage.id) {
+					if ($ExistingEntry) {
+						$New_UsageHistory = $ExistingEntry | Select-Object id, DaysActive, LastActive, ComputersUsed
+					} else {
+						$New_UsageHistory = @{
+							id = $UserID
+							DaysActive = @{
+								Total = 0
+								LastMonth = 0
+								LastMonthPercent = 0
+								History = @{}
+								HistoryPercent = @{}
+							}
+							LastActive = $null
+							ComputersUsed = @()
+						}
+					}
+
+					$MonthsUsage = $Monthly_UsageByUser | Where-Object { $_.Name -eq $UserID }
+					$DaysActive = ($MonthsUsage.Group | Select-Object Day | Select-Object -ExpandProperty Day | Sort-Object -Unique | Measure-Object).Count
+					$DaysActivePercent = [Math]::Round($DaysActive / $Monthly_OutOfDays * 100)
+
+					$New_UsageHistory.DaysActive.Total += $DaysActive
+					$New_UsageHistory.DaysActive.LastMonth = $DaysActive
+					$New_UsageHistory.DaysActive.LastMonthPercent = $DaysActivePercent
+					if ($New_UsageHistory.DaysActive.History -is 'PSCustomObject') {
+						$New_UsageHistory.DaysActive.History | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
+						$New_UsageHistory.DaysActive.HistoryPercent | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
+						$New_UsageHistory.DaysActive.History.$Year_Month = $DaysActive
+						$New_UsageHistory.DaysActive.HistoryPercent.$Year_Month = $DaysActivePercent
+					} else {
+						$New_UsageHistory.DaysActive.History[$Year_Month] = $DaysActive
+						$New_UsageHistory.DaysActive.HistoryPercent[$Year_Month] = $DaysActivePercent
+					}
+					$New_UsageHistory.LastActive = ($MonthsUsage.Group | Sort-Object { $_.UseDateTime -as [DateTime] } -Descending | Select-Object -First 1).UseDateTime
+					$New_UsageHistory.ComputersUsed | Foreach-Object {
+						$_.DaysActive.LastMonth = 0
+						$_.DaysActive.LastMonthPercent = 0
+					}
+
+					# Update the ComputersUsed array with usage stats for this user on a per-computer basis
+					$MonthsUsageByComputer = $Monthly_UsageByComputerUser | Where-Object { $_.Name -like "*$UserID*" }
+					$Existing_ComputersUsed = [Collections.Generic.List[Object]]$New_UsageHistory.ComputersUsed
+					foreach ($Computer in $MonthsUsageByComputer) {
+						$ComputerID = $Computer.Group[0].ComputerID
+						$DaysActive = ($Computer.Group | Select-Object Day | Select-Object -ExpandProperty Day | Sort-Object -Unique | Measure-Object).Count
+						$DaysActivePercent = [Math]::Round($DaysActive / $Monthly_OutOfDays * 100)
+
+						$ExistingIndex = $Existing_ComputersUsed.FindIndex( {$args[0].id -eq $ComputerID } )
+						if ($ExistingIndex -ge 0) {
+							$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.Total += $DaysActive
+							$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.LastMonth = $DaysActive
+							$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.LastMonthPercent = $DaysActivePercent
+							if ($New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.History -is 'PSCustomObject') {
+								$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.History | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
+								$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.HistoryPercent | Add-Member -NotePropertyName $Year_Month -NotePropertyValue 0
+								$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.History.$Year_Month = $DaysActive
+								$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.HistoryPercent.$Year_Month = $DaysActivePercent
+							} else {
+								$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.History[$Year_Month] = $DaysActive
+								$New_UsageHistory.ComputersUsed[$ExistingIndex].DaysActive.HistoryPercent[$Year_Month] = $DaysActivePercent
+							}
+							$New_UsageHistory.ComputersUsed[$ExistingIndex].LastActive = ($MonthsUsageByComputer.Group | Sort-Object { $_.UseDateTime -as [DateTime] } -Descending | Select-Object -First 1).UseDateTime
+						} else {
+							$New_UsageHistory.ComputersUsed += @{
+								id = $ComputerID
+								DaysActive = @{
+									Total = $DaysActive
+									LastMonth = $DaysActive
+									LastMonthPercent = $DaysActivePercent
+									History = @{
+										$Year_Month = $DaysActive
+									}
+									HistoryPercent = @{
+										$Year_Month = $DaysActivePercent
+									}
+								}
+								LastActive = ($MonthsUsageByComputer.Group | Sort-Object { $_.UseDateTime -as [DateTime] } -Descending | Select-Object -First 1).UseDateTime
+							}
+						}
+					}
+
+					$Updated_UserUsage += $New_UsageHistory
+				}
+
+				# Update the DB with the new monthly user usage stats
+				foreach ($Updated_Usage in $Updated_UserUsage) {
+					if ($Updated_Usage.id -in $Existing_UserUsage.id) {
+						# update
+						Set-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "UserUsage" -Id $Updated_Usage.id -DocumentBody ($Updated_Usage | ConvertTo-Json -Depth 10) -PartitionKey $Updated_Usage.id | Out-Null
+					} else {
+						# new
+						New-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "UserUsage" -DocumentBody ($Updated_Usage | ConvertTo-Json -Depth 10) -PartitionKey $Updated_Usage.id | Out-Null
+					}
+				}
+
+				# Update the LastUpdated variable
+				$StatsUpdated = @{
+					variable = 'StatsLastUpdated'
+					LastUpdated = Get-Date (Get-Date).ToUniversalTime() -UFormat '+%Y-%m-%dT%H:%M:%S.000Z'
+				}
+				if ($StatsLastUpdated) {
 					# update
-					Set-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "UserUsage" -Id $Updated_Usage.id -DocumentBody ($Updated_Usage | ConvertTo-Json -Depth 10) -PartitionKey $Updated_Usage.id | Out-Null
+					$StatsUpdated.id = $StatsLastUpdated.id
+					Set-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Variables" -Id $StatsLastUpdated.id -DocumentBody ($StatsUpdated | ConvertTo-Json) -PartitionKey 'StatsLastUpdated' | Out-Null
 				} else {
 					# new
-					New-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "UserUsage" -DocumentBody ($Updated_Usage | ConvertTo-Json -Depth 10) -PartitionKey $Updated_Usage.id | Out-Null
+					$StatsUpdated.id = $([Guid]::NewGuid().ToString())
+					New-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Variables" -DocumentBody ($StatsUpdated | ConvertTo-Json) -PartitionKey 'StatsLastUpdated' | Out-Null
 				}
 			}
-
-			# Update the LastUpdated variable
-			$StatsUpdated = @{
-				variable = 'StatsLastUpdated'
-				LastUpdated = Get-Date (Get-Date).ToUniversalTime() -UFormat '+%Y-%m-%dT%H:%M:%S.000Z'
-			}
-			if ($StatsLastUpdated) {
-				# update
-				$StatsUpdated.id = $StatsLastUpdated.id
-				Set-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Variables" -Id $StatsLastUpdated.id -DocumentBody ($StatsUpdated | ConvertTo-Json) -PartitionKey 'StatsLastUpdated' | Out-Null
-			} else {
-				# new
-				$StatsUpdated.id = $([Guid]::NewGuid().ToString())
-				New-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Variables" -DocumentBody ($StatsUpdated | ConvertTo-Json) -PartitionKey 'StatsLastUpdated' | Out-Null
-			}
 		}
-	}
 
-	Write-Host "Usage Stats Saved!"
-	Write-Host "===================="
+		Write-Host "Usage Stats Saved!"
+		Write-Host "===================="
+		break
+	}
 
 	# Reconnect to the main Azure service principal
 	Disconnect-AzAccount | Out-Null

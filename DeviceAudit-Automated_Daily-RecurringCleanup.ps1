@@ -1644,404 +1644,407 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 	# Save each user and the computer(s) they are using into the Usage database (for user audits and documenting who uses each computer)
 	if ($DOUsageDBSave -and $AzureCredentials_CosmosDB) {
-		# Connect to Account and DB
-		$Account_Name = "stats-$($Company_Acronym.ToLower())"
-		$Account = Get-CosmosDbAccount -Name $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup 2>&1
-		Write-PSFMessage -Level Verbose -Message "Saving Usage, AccountName: $($Account_Name) ResourceGroupName: $($Database_Connection.ResourceGroup)"
-		if (!$Account -or ($Account.GetType()).Name -eq 'ErrorRecord') {
-			Write-PSFMessage -Level Verbose -Message "No DB account found for: $Company_Acronym"
-			try {
-				New-CosmosDbAccount -Name $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup -Location 'WestUS2' -Capability @('EnableServerless')
-			} catch { 
-				Write-PSFMessage -Level Verbose -Message "Account creation failed for $Company_Acronym. Exiting..."
-				Write-Host "Account creation failed for $Company_Acronym. Exiting..." -ForegroundColor Red
-				exit
-			} 
-			$Account = Get-CosmosDbAccount -Name $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup
-			
-		}
-
-		$DB_Name = "DeviceUsage"
-		$backoffPolicy = New-CosmosDbBackoffPolicy -MaxRetries 5
-		$cosmosDbContext_management = $null
-		$entraIdOAuthToken = Get-CosmosDbEntraIdToken -Endpoint "https://$Account_Name.documents.azure.com" -WarningAction SilentlyContinue
-
-		$newCosmosDbContextParams  = @{
-			Account      	= $Account_Name
-			EntraIdToken 	= $entraIdOAuthToken
-			Database 		= $DB_Name
-			BackoffPolicy 	= $backoffPolicy
-		}
-		$cosmosDbContext = (New-CosmosDbContext @newCosmosDbContextParams) 2>&1
-
-		if (!$cosmosDbContext -or ($cosmosDbContext.GetType()).Name -eq 'ErrorRecord') {
-			Write-PSFMessage -Level Verbose -Message "Could not get cosmos db context. Exiting..."
-			exit
-		}
-		
-		Write-Host "Saving usage stats..."
-	
-		$Now = Get-Date
-		$Now_UTC = Get-Date (Get-Date).ToUniversalTime() -UFormat '+%Y-%m-%dT%H:%M:%S.000Z'
-	
-		# Get all the computers and users first and query them in powershell to reduce db usage. This is MUCH cheaper than querying as we go!
-		$Query = "SELECT * FROM Computers c"
-		$ExistingComputers = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Computers" -Query $Query -PartitionKey 'computer'
-		$Query = "SELECT * FROM Users u"
-		$ExistingUsers = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Users" -Query $Query -PartitionKey 'user'
-
-		# We will also only add a usage entry if one has not already been added today
-		$Year_Month = Get-Date -Format 'yyyy-MM'
-		$Query = "SELECT * FROM Usage u WHERE u.UseDateTime >= '$(Get-Date -UFormat '+%Y-%m-%dT00:00:00.000Z')'"
-		$ExistingUsageToday = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Usage" -Query $Query -PartitionKey $Year_Month
-	
-		foreach ($Device in $MatchedDevices) {
-			$ActivityComparison = $Device.activity_comparison
-			$Activity = $ActivityComparison.Values | Sort-Object last_active
-	
-			if (($Activity | Measure-Object).count -gt 0) {
-				$NewestDate = [DateTime]($Activity.last_active | Sort-Object | Select-Object -Last 1)
-				$Timespan = New-TimeSpan -Start $NewestDate -End $Now
-				$DeviceUsageUpdateRan = $true
-	
-				if ($Timespan.TotalHours -gt 6) {
-					# The device has not been seen in the last 6 hours, lets just skip it
-					continue;
-				}
-	
-				$LastActive = $NewestDate;
-				$SCDevices = @()
-				foreach ($DeviceID in $Device.sc_matches) {
-					$SCDevices += $SC_DevicesHash[$DeviceID]
-				}
-	
-				# If this device exists in SC, lets make sure it was also recently logged into (not just on)
-				$SCLastActive = ($SCDevices | Sort-Object -Property GuestLastActivityTime | Select-Object -Last 1).GuestLastActivityTime
-				if ($SCLastActive -and (New-TimeSpan -Start $SCLastActive -End $Now).TotalHours -gt 6) { 
-					# online but not logged in, skip it
-					continue;
-				} elseif ($SCLastActive) {
-					# replace $LastActive with the last active time
-					$LastActive = $SCLastActive
-				}
-	
-				$RMMDevices = @()
-				foreach ($DeviceID in $Device.rmm_matches) {
-					$RMMDevices += $RMM_DevicesHash[$DeviceID]
-				}
-	
-				if (!$SCDevices -and !$RMMDevices) {
-					# Lets ignore anything that's only in sophos, we can't match those securely enough for this
-					continue;
-				}
-	
-				# The device has been recently seen and logged into (can only tell if it was recently logged into if the device is in SC)
-				$Hostname = $false
-				$Username = $false
-				$Domain = $false
-				$DeviceType = $false
-				$OperatingSystem = $false
-				$Manufacturer = $false
-				$Model = $false
-				$WarrantyExpiry = $false
-	
-				if ($RMMDevices) {
-					$RMMDevice = $RMMDevices | Sort-Object -Property "Last Seen" | Select-Object -Last 1
-					$Hostname = $RMMDevice."Device Hostname"
-					$DeviceType = $RMMDevice."Device Type"
-					$OperatingSystem = $RMMDevice."Operating System"
-					$Manufacturer = $RMMDevice."Manufacturer"
-					$Model = $RMMDevice."Device Model"
-					$WarrantyExpiry = $RMMDevice."Warranty Expiry"
-	
-					if ($RMMDevice."Last User" -like "*\*") {
-						$Username = ($RMMDevice."Last User" -split '\\')[1]
-					} else {
-						$Username = $RMMDevice."Last User"
-					}
-					if ($RMMDevice."Last User" -like "AzureAD\*") {
-						$Domain = "AzureAD"
-					} else {
-						$Domain = $RMMDevice.domain
-					}
-					if (!$Domain -or $Domain -like $Hostname) {
-						$Domain = $false
-					}
-				}
-	
-				if ($SCDevices) {
-					$SCDevice = $SCDevices | Sort-Object -Property GuestLastSeen | Select-Object -Last 1
-					if (!$Hostname) {
-						$Hostname = $SCDevice.Name
-					}
-					if (!$DeviceType) {
-						$DeviceType = $SCDevice.DeviceType
-					}
-					if (!$Username) {
-						$Username = $SCDevice.GuestLoggedOnUserName
-					}
-					if (!$Domain -and $SCDevice.GuestLoggedOnUserDomain -and $SCDevice.GuestLoggedOnUserDomain -notlike $Hostname) {
-						$Domain = $SCDevice.GuestLoggedOnUserDomain
-					}
-					$OperatingSystem = $SCDevice.GuestOperatingSystemName
-					if (!$Manufacturer) {
-						$Manufacturer = $SCDevice.GuestMachineManufacturerName
-					}
-					if (!$Model) {
-						$Model = $SCDevice.GuestMachineModel
-					}
-				}
-	
-				if (!$Username -or $Username -in $UsernameBlacklist) {
-					# skip this if it's in the username blacklist
-					continue;
-				}
-	
-				$SerialNumbers = @()
-				$SerialNumbers += $SCDevices.GuestMachineSerialNumber
-				$SerialNumbers += $RMMDevices."Serial Number"
-				$SerialNumbers = $SerialNumbers | Where-Object { $_ -notin $IgnoreSerials }
-				$SerialNumbers = $SerialNumbers | Sort-Object -Unique
-	
-				if (!$DeviceType) {
-					if ($OperatingSystem -and $OperatingSystem -like "*Server*") {
-						$DeviceType = "Server"
-					} else {
-						$DeviceType = "Workstation"
-					}
-				}
+		# Use a while loop and break at the end, this allows us to break out of it at any time if there is an issue updating the DB (which beats having a ton of nested for loops!)
+		:continueDBOperations while ($true) {
+			# Connect to Account and DB
+			$Account_Name = "stats-$($Company_Acronym.ToLower())"
+			$Account = Get-CosmosDbAccount -Name $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup 2>&1
+			Write-PSFMessage -Level Verbose -Message "Saving Usage, AccountName: $($Account_Name) ResourceGroupName: $($Database_Connection.ResourceGroup)"
+			if (!$Account -or ($Account.GetType()).Name -eq 'ErrorRecord') {
+				Write-PSFMessage -Level Verbose -Message "No DB account found for: $Company_Acronym"
+				try {
+					New-CosmosDbAccount -Name $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup -Location 'WestUS2' -Capability @('EnableServerless')
+				} catch { 
+					Write-PSFMessage -Level Verbose -Message "Account creation failed for $Company_Acronym. Exiting..."
+					Write-Host "Account creation failed for $Company_Acronym. Exiting..." -ForegroundColor Red
+					break continueDBOperations
+				} 
+				$Account = Get-CosmosDbAccount -Name $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup
 				
-				if ($DeviceType -eq "Server") {
-					# Skip servers
-					continue;
-				}
-	
-				# cleanup data to be more readable
-				if ($Manufacturer) {
-					$Manufacturer = manufacturer_cleanup -Manufacturer $Manufacturer
-				}
-	
-				if ($OperatingSystem) {
-					if ($OperatingSystem -like "Microsoft*") {
-						$OperatingSystem = $OperatingSystem -replace " ?(((\d+)\.*)+)$", ""
-					} elseif ($OperatingSystem -like "VMware*") {
-						$OperatingSystem = $OperatingSystem -replace " ?(build\d*) (((\d+)\.*)+)$", ""
-					}
-				}
-	
-				if ($WarrantyExpiry) {
-					$WarrantyExpiry = $WarrantyExpiry -replace " UTC$", ""
-					$WarrantyExpiry = ([DateTime]$WarrantyExpiry).ToString("yyyy-MM-ddT00:00:00.000Z")
-				}
-	
-				$LastActive = Get-Date $LastActive.ToUniversalTime() -UFormat '+%Y-%m-%dT%H:%M:%S.000Z'
-				$Year_Month = Get-Date $LastActive -Format 'yyyy-MM'
-	
-				# Lets see if this computer is already in the database
-				if ($SerialNumbers) {
-					$Computers = $ExistingComputers | Where-Object { $_.SerialNumber -match "\|" + ($SerialNumbers -join "|") + "\|" }
-				} else {
-					$Computers = $ExistingComputers | Where-Object { $_.Hostname -like $Hostname }
-				}
-	
-				# Narrow down to 1 computer
-				if (($Computers | Measure-Object).Count -gt 1) {
-					$Computers_Accuracy = $Computers;
-					$Computers_Accuracy | Add-Member -NotePropertyName Accuracy -NotePropertyValue 0
-					foreach ($Computer in $Computers_Accuracy) {
-						$Accuracy = 0;
-						if ($Hostname -like $Computer.Hostname) {
-							$Accuracy++
-						}
-						$Device.sc_matches | ForEach-Object {
-							if ("%|$($_)|%" -like $Computer.SC_ID) {
-								$Accuracy++
-							}
-						}
-						$Device.rmm_matches | ForEach-Object {
-							if ("%|$($_)|%" -like $Computer.RMM_ID) {
-								$Accuracy++
-							}
-						}
-						$Device.sophos_matches | ForEach-Object {
-							if ("%|$($_)|%" -like $Computer.Sophos_ID) {
-								$Accuracy++
-							}
-						}
-						$SerialNumbers | ForEach-Object {
-							if ("%|$($_)|%" -like $Computer.SerialNumber) {
-								$Accuracy++
-							}
-						}
-						if ($Manufacturer -like $Computer.Manufacturer) {
-							$Accuracy++
-						}
-						if ($Model -like $Computer.Model) {
-							$Accuracy++
-						}
-						if ($OperatingSystem -like $Computer.OS) {
-							$Accuracy++
-						}
-						$Computer.Accuracy = $Accuracy
-					}
-	
-					$BestComputer = $Computers_Accuracy | Sort-Object -Property Accuracy, LastUpdated -Descending | Select-Object -First 1
-					$Computers = $Computers | Where-Object { $_.id -eq $BestComputer[0].id }
-				}
-	
-				$SC_String = "|$($Device.sc_matches -join '|')|"
-				$RMM_String = "|$($Device.rmm_matches -join '|')|"
-				$Sophos_String = "|$($Device.sophos_matches -join '|')|"
-				$ITG_String = "|$($Device.itg_matches -join '|')|"
-				$Autotask_String = "|$($Device.autotask_matches -join '|')|"
-				$SerialNum_String = "|$($SerialNumbers  -join '|')|"
-	
-				if (!$Computers) {
-					# No computer found, lets insert it
-					$ComputerID = $([Guid]::NewGuid().ToString())
-					$Computer = @{
-						id = $ComputerID
-						Hostname = $Hostname
-						SC_ID = $SC_String
-						RMM_ID = $RMM_String
-						Sophos_ID = $Sophos_String
-						Autotask_ID = $Autotask_String
-						ITG_ID = $ITG_String
-						DeviceType = $DeviceType
-						SerialNumber = $SerialNum_String
-						Manufacturer = $Manufacturer
-						Model = $Model
-						OS = $OperatingSystem
-						WarrantyExpiry = $WarrantyExpiry
-						LastUpdated = $Now_UTC
-						type = "computer"
-					} | ConvertTo-Json
-					New-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Computers" -DocumentBody $Computer -PartitionKey 'computer' | Out-Null
-				} else {
-					# Computer exists, see if we need to update the details
-					$UpdateRequired = $false
-					$UpdatedComputer = $Computers[0] | Select-Object Id, Hostname, SC_ID, RMM_ID, Sophos_ID, Autotask_ID, ITG_ID, DeviceType, SerialNumber, Manufacturer, Model, OS, WarrantyExpiry, LastUpdated, type
-					if ($Hostname -ne $Computers.Hostname) {
-						$UpdatedComputer.Hostname = $Hostname
-						$UpdateRequired = $true
-					}
-					if ($DeviceType -ne $Computers.DeviceType) {
-						$UpdatedComputer.DeviceType = $DeviceType
-						$UpdateRequired = $true
-					}
-					if ($Manufacturer -ne $Computers.Manufacturer) {
-						$UpdatedComputer.Manufacturer = $Manufacturer
-						$UpdateRequired = $true
-					}
-					if ($Model -ne $Computers.Model) {
-						$UpdatedComputer.Model = $Model
-						$UpdateRequired = $true
-					}
-					if ($OperatingSystem -ne $Computers.OS) {
-						$UpdatedComputer.OS = $OperatingSystem
-						$UpdateRequired = $true
-					}
-					if ($WarrantyExpiry -ne $Computers.WarrantyExpiry) {
-						$UpdatedComputer.WarrantyExpiry = $WarrantyExpiry
-						$UpdateRequired = $true
-					}
-		
-					if ($SC_String -ne $Computers.SC_ID) {
-						$UpdatedComputer.SC_ID = $SC_String
-						$UpdateRequired = $true
-					}
-					if ($RMM_String -ne $Computers.RMM_ID) {
-						$UpdatedComputer.RMM_ID = $RMM_String
-						$UpdateRequired = $true
-					}
-					if ($Sophos_String -ne $Computers.Sophos_ID) {
-						$UpdatedComputer.Sophos_ID = $Sophos_String
-						$UpdateRequired = $true
-					}
-					if (!$Computers.Autotask_ID -or $Autotask_String -ne $Computers.Autotask_ID) {
-						if (!(Get-Member -inputobject $UpdatedComputer -name "Autotask_ID" -Membertype Properties)) {
-							$UpdatedComputer | Add-Member -NotePropertyName Autotask_ID -NotePropertyValue $null
-						}
-						$UpdatedComputer.Autotask_ID = $Autotask_String
-						$UpdateRequired = $true
-					}
-					if (!$Computers.ITG_ID -or $ITG_String -ne $Computers.ITG_ID) {
-						if (!(Get-Member -inputobject $UpdatedComputer -name "ITG_ID" -Membertype Properties)) {
-							$UpdatedComputer | Add-Member -NotePropertyName ITG_ID -NotePropertyValue $null
-						}
-						$UpdatedComputer.ITG_ID = $ITG_String
-						$UpdateRequired = $true
-					}
-					if ($SerialNum_String -ne $Computers.SerialNumber) {
-						$UpdatedComputer.SerialNumber = $SerialNum_String
-						$UpdateRequired = $true
-					}
-		
-					$ComputerID = $Computers[0].Id
-					if ($UpdateRequired) {
-						$UpdatedComputer.LastUpdated = $Now_UTC
-						Set-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Computers" -Id $ComputerID -DocumentBody ($UpdatedComputer | ConvertTo-Json) -PartitionKey 'computer' | Out-Null
-					}
-				}
-
-				if ($Domain -and $Domain -eq "AzureAD") { 
-					$DomainOrLocal = "AzureAD"
-				} elseif ($Domain -and $Domain -ne "WORKGROUP") {
-					$DomainOrLocal = "Domain"
-				} else { 
-					$DomainOrLocal = "Local"
-				}
-	
-				# Get the User ID, if not already in DB, add a new user
-				$User = $ExistingUsers | Where-Object { $_.Username -like $Username } | Sort-Object LastUpdated | Select-Object -First 1
-	
-				if (!$User) {
-					# Add user
-					$UserID = $([Guid]::NewGuid().ToString())
-					$User = @{
-						id = $UserID
-						Username = $Username
-						DomainOrLocal = $DomainOrLocal
-						Domain = $Domain
-						ADUsername = $null
-						O365Email = $null
-						ITG_ID = $null
-						LastUpdated = $Now_UTC
-						type = "user"
-					} | ConvertTo-Json
-					New-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Users" -DocumentBody $User -PartitionKey 'user' | Out-Null
-				} else {
-					# If changing fields, update in user audit as well
-					$User = $User | Select-Object Id, Domain, DomainOrLocal, Username, LastUpdated, type, O365Email, ITG_ID, ADUsername
-					$UserID = $User[0].Id
-					if (!$User.DomainOrLocal -or $User.Domain -ne $Domain -or $User.DomainOrLocal -ne $DomainOrLocal) {
-						$User.DomainOrLocal = $DomainOrLocal
-						$User.Domain = $Domain
-						$User.LastUpdated = $Now_UTC
-						Set-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Users" -Id $UserID -DocumentBody ($User | ConvertTo-Json) -PartitionKey 'user' | Out-Null
-					}
-				}
-
-				# If a usage entry already exists today, skip adding another
-				if (($ExistingUsageToday | Where-Object { $_.ComputerID -eq $Computers.id -and $_.UserID -eq $User.id } | Measure-Object).Count -gt 1) {
-					continue
-				}
-	
-				# Add a usage entry
-				$ID = $([Guid]::NewGuid().ToString())
-				$Usage = @{
-					id = $ID
-					ComputerID = $ComputerID
-					UserID = $UserID
-					UseDateTime = $LastActive
-					yearmonth = $Year_Month
-				} | ConvertTo-Json
-				New-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Usage" -DocumentBody $Usage -PartitionKey $Year_Month | Out-Null
 			}
+
+			$DB_Name = "DeviceUsage"
+			$backoffPolicy = New-CosmosDbBackoffPolicy -MaxRetries 5
+			$entraIdOAuthToken = Get-CosmosDbEntraIdToken -Endpoint "https://$Account_Name.documents.azure.com" -WarningAction SilentlyContinue
+
+			$newCosmosDbContextParams  = @{
+				Account      	= $Account_Name
+				EntraIdToken 	= $entraIdOAuthToken
+				Database 		= $DB_Name
+				BackoffPolicy 	= $backoffPolicy
+			}
+			$cosmosDbContext = (New-CosmosDbContext @newCosmosDbContextParams) 2>&1
+
+			if (!$cosmosDbContext -or ($cosmosDbContext.GetType()).Name -eq 'ErrorRecord') {
+				Write-PSFMessage -Level Verbose -Message "Could not get cosmos db context. Exiting..."
+				break continueDBOperations
+			}
+			
+			Write-Host "Saving usage stats..."
+		
+			$Now = Get-Date
+			$Now_UTC = Get-Date (Get-Date).ToUniversalTime() -UFormat '+%Y-%m-%dT%H:%M:%S.000Z'
+		
+			# Get all the computers and users first and query them in powershell to reduce db usage. This is MUCH cheaper than querying as we go!
+			$Query = "SELECT * FROM Computers c"
+			$ExistingComputers = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Computers" -Query $Query -PartitionKey 'computer'
+			$Query = "SELECT * FROM Users u"
+			$ExistingUsers = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Users" -Query $Query -PartitionKey 'user'
+
+			# We will also only add a usage entry if one has not already been added today
+			$Year_Month = Get-Date -Format 'yyyy-MM'
+			$Query = "SELECT * FROM Usage u WHERE u.UseDateTime >= '$(Get-Date -UFormat '+%Y-%m-%dT00:00:00.000Z')'"
+			$ExistingUsageToday = Get-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Usage" -Query $Query -PartitionKey $Year_Month
+		
+			foreach ($Device in $MatchedDevices) {
+				$ActivityComparison = $Device.activity_comparison
+				$Activity = $ActivityComparison.Values | Sort-Object last_active
+		
+				if (($Activity | Measure-Object).count -gt 0) {
+					$NewestDate = [DateTime]($Activity.last_active | Sort-Object | Select-Object -Last 1)
+					$Timespan = New-TimeSpan -Start $NewestDate -End $Now
+					$DeviceUsageUpdateRan = $true
+		
+					if ($Timespan.TotalHours -gt 6) {
+						# The device has not been seen in the last 6 hours, lets just skip it
+						continue;
+					}
+		
+					$LastActive = $NewestDate;
+					$SCDevices = @()
+					foreach ($DeviceID in $Device.sc_matches) {
+						$SCDevices += $SC_DevicesHash[$DeviceID]
+					}
+		
+					# If this device exists in SC, lets make sure it was also recently logged into (not just on)
+					$SCLastActive = ($SCDevices | Sort-Object -Property GuestLastActivityTime | Select-Object -Last 1).GuestLastActivityTime
+					if ($SCLastActive -and (New-TimeSpan -Start $SCLastActive -End $Now).TotalHours -gt 6) { 
+						# online but not logged in, skip it
+						continue;
+					} elseif ($SCLastActive) {
+						# replace $LastActive with the last active time
+						$LastActive = $SCLastActive
+					}
+		
+					$RMMDevices = @()
+					foreach ($DeviceID in $Device.rmm_matches) {
+						$RMMDevices += $RMM_DevicesHash[$DeviceID]
+					}
+		
+					if (!$SCDevices -and !$RMMDevices) {
+						# Lets ignore anything that's only in sophos, we can't match those securely enough for this
+						continue;
+					}
+		
+					# The device has been recently seen and logged into (can only tell if it was recently logged into if the device is in SC)
+					$Hostname = $false
+					$Username = $false
+					$Domain = $false
+					$DeviceType = $false
+					$OperatingSystem = $false
+					$Manufacturer = $false
+					$Model = $false
+					$WarrantyExpiry = $false
+		
+					if ($RMMDevices) {
+						$RMMDevice = $RMMDevices | Sort-Object -Property "Last Seen" | Select-Object -Last 1
+						$Hostname = $RMMDevice."Device Hostname"
+						$DeviceType = $RMMDevice."Device Type"
+						$OperatingSystem = $RMMDevice."Operating System"
+						$Manufacturer = $RMMDevice."Manufacturer"
+						$Model = $RMMDevice."Device Model"
+						$WarrantyExpiry = $RMMDevice."Warranty Expiry"
+		
+						if ($RMMDevice."Last User" -like "*\*") {
+							$Username = ($RMMDevice."Last User" -split '\\')[1]
+						} else {
+							$Username = $RMMDevice."Last User"
+						}
+						if ($RMMDevice."Last User" -like "AzureAD\*") {
+							$Domain = "AzureAD"
+						} else {
+							$Domain = $RMMDevice.domain
+						}
+						if (!$Domain -or $Domain -like $Hostname) {
+							$Domain = $false
+						}
+					}
+		
+					if ($SCDevices) {
+						$SCDevice = $SCDevices | Sort-Object -Property GuestLastSeen | Select-Object -Last 1
+						if (!$Hostname) {
+							$Hostname = $SCDevice.Name
+						}
+						if (!$DeviceType) {
+							$DeviceType = $SCDevice.DeviceType
+						}
+						if (!$Username) {
+							$Username = $SCDevice.GuestLoggedOnUserName
+						}
+						if (!$Domain -and $SCDevice.GuestLoggedOnUserDomain -and $SCDevice.GuestLoggedOnUserDomain -notlike $Hostname) {
+							$Domain = $SCDevice.GuestLoggedOnUserDomain
+						}
+						$OperatingSystem = $SCDevice.GuestOperatingSystemName
+						if (!$Manufacturer) {
+							$Manufacturer = $SCDevice.GuestMachineManufacturerName
+						}
+						if (!$Model) {
+							$Model = $SCDevice.GuestMachineModel
+						}
+					}
+		
+					if (!$Username -or $Username -in $UsernameBlacklist) {
+						# skip this if it's in the username blacklist
+						continue;
+					}
+		
+					$SerialNumbers = @()
+					$SerialNumbers += $SCDevices.GuestMachineSerialNumber
+					$SerialNumbers += $RMMDevices."Serial Number"
+					$SerialNumbers = $SerialNumbers | Where-Object { $_ -notin $IgnoreSerials }
+					$SerialNumbers = $SerialNumbers | Sort-Object -Unique
+		
+					if (!$DeviceType) {
+						if ($OperatingSystem -and $OperatingSystem -like "*Server*") {
+							$DeviceType = "Server"
+						} else {
+							$DeviceType = "Workstation"
+						}
+					}
+					
+					if ($DeviceType -eq "Server") {
+						# Skip servers
+						continue;
+					}
+		
+					# cleanup data to be more readable
+					if ($Manufacturer) {
+						$Manufacturer = manufacturer_cleanup -Manufacturer $Manufacturer
+					}
+		
+					if ($OperatingSystem) {
+						if ($OperatingSystem -like "Microsoft*") {
+							$OperatingSystem = $OperatingSystem -replace " ?(((\d+)\.*)+)$", ""
+						} elseif ($OperatingSystem -like "VMware*") {
+							$OperatingSystem = $OperatingSystem -replace " ?(build\d*) (((\d+)\.*)+)$", ""
+						}
+					}
+		
+					if ($WarrantyExpiry) {
+						$WarrantyExpiry = $WarrantyExpiry -replace " UTC$", ""
+						$WarrantyExpiry = ([DateTime]$WarrantyExpiry).ToString("yyyy-MM-ddT00:00:00.000Z")
+					}
+		
+					$LastActive = Get-Date $LastActive.ToUniversalTime() -UFormat '+%Y-%m-%dT%H:%M:%S.000Z'
+					$Year_Month = Get-Date $LastActive -Format 'yyyy-MM'
+		
+					# Lets see if this computer is already in the database
+					if ($SerialNumbers) {
+						$Computers = $ExistingComputers | Where-Object { $_.SerialNumber -match "\|" + ($SerialNumbers -join "|") + "\|" }
+					} else {
+						$Computers = $ExistingComputers | Where-Object { $_.Hostname -like $Hostname }
+					}
+		
+					# Narrow down to 1 computer
+					if (($Computers | Measure-Object).Count -gt 1) {
+						$Computers_Accuracy = $Computers;
+						$Computers_Accuracy | Add-Member -NotePropertyName Accuracy -NotePropertyValue 0
+						foreach ($Computer in $Computers_Accuracy) {
+							$Accuracy = 0;
+							if ($Hostname -like $Computer.Hostname) {
+								$Accuracy++
+							}
+							$Device.sc_matches | ForEach-Object {
+								if ("%|$($_)|%" -like $Computer.SC_ID) {
+									$Accuracy++
+								}
+							}
+							$Device.rmm_matches | ForEach-Object {
+								if ("%|$($_)|%" -like $Computer.RMM_ID) {
+									$Accuracy++
+								}
+							}
+							$Device.sophos_matches | ForEach-Object {
+								if ("%|$($_)|%" -like $Computer.Sophos_ID) {
+									$Accuracy++
+								}
+							}
+							$SerialNumbers | ForEach-Object {
+								if ("%|$($_)|%" -like $Computer.SerialNumber) {
+									$Accuracy++
+								}
+							}
+							if ($Manufacturer -like $Computer.Manufacturer) {
+								$Accuracy++
+							}
+							if ($Model -like $Computer.Model) {
+								$Accuracy++
+							}
+							if ($OperatingSystem -like $Computer.OS) {
+								$Accuracy++
+							}
+							$Computer.Accuracy = $Accuracy
+						}
+		
+						$BestComputer = $Computers_Accuracy | Sort-Object -Property Accuracy, LastUpdated -Descending | Select-Object -First 1
+						$Computers = $Computers | Where-Object { $_.id -eq $BestComputer[0].id }
+					}
+		
+					$SC_String = "|$($Device.sc_matches -join '|')|"
+					$RMM_String = "|$($Device.rmm_matches -join '|')|"
+					$Sophos_String = "|$($Device.sophos_matches -join '|')|"
+					$ITG_String = "|$($Device.itg_matches -join '|')|"
+					$Autotask_String = "|$($Device.autotask_matches -join '|')|"
+					$SerialNum_String = "|$($SerialNumbers  -join '|')|"
+		
+					if (!$Computers) {
+						# No computer found, lets insert it
+						$ComputerID = $([Guid]::NewGuid().ToString())
+						$Computer = @{
+							id = $ComputerID
+							Hostname = $Hostname
+							SC_ID = $SC_String
+							RMM_ID = $RMM_String
+							Sophos_ID = $Sophos_String
+							Autotask_ID = $Autotask_String
+							ITG_ID = $ITG_String
+							DeviceType = $DeviceType
+							SerialNumber = $SerialNum_String
+							Manufacturer = $Manufacturer
+							Model = $Model
+							OS = $OperatingSystem
+							WarrantyExpiry = $WarrantyExpiry
+							LastUpdated = $Now_UTC
+							type = "computer"
+						} | ConvertTo-Json
+						New-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Computers" -DocumentBody $Computer -PartitionKey 'computer' | Out-Null
+					} else {
+						# Computer exists, see if we need to update the details
+						$UpdateRequired = $false
+						$UpdatedComputer = $Computers[0] | Select-Object Id, Hostname, SC_ID, RMM_ID, Sophos_ID, Autotask_ID, ITG_ID, DeviceType, SerialNumber, Manufacturer, Model, OS, WarrantyExpiry, LastUpdated, type
+						if ($Hostname -ne $Computers.Hostname) {
+							$UpdatedComputer.Hostname = $Hostname
+							$UpdateRequired = $true
+						}
+						if ($DeviceType -ne $Computers.DeviceType) {
+							$UpdatedComputer.DeviceType = $DeviceType
+							$UpdateRequired = $true
+						}
+						if ($Manufacturer -ne $Computers.Manufacturer) {
+							$UpdatedComputer.Manufacturer = $Manufacturer
+							$UpdateRequired = $true
+						}
+						if ($Model -ne $Computers.Model) {
+							$UpdatedComputer.Model = $Model
+							$UpdateRequired = $true
+						}
+						if ($OperatingSystem -ne $Computers.OS) {
+							$UpdatedComputer.OS = $OperatingSystem
+							$UpdateRequired = $true
+						}
+						if ($WarrantyExpiry -ne $Computers.WarrantyExpiry) {
+							$UpdatedComputer.WarrantyExpiry = $WarrantyExpiry
+							$UpdateRequired = $true
+						}
+			
+						if ($SC_String -ne $Computers.SC_ID) {
+							$UpdatedComputer.SC_ID = $SC_String
+							$UpdateRequired = $true
+						}
+						if ($RMM_String -ne $Computers.RMM_ID) {
+							$UpdatedComputer.RMM_ID = $RMM_String
+							$UpdateRequired = $true
+						}
+						if ($Sophos_String -ne $Computers.Sophos_ID) {
+							$UpdatedComputer.Sophos_ID = $Sophos_String
+							$UpdateRequired = $true
+						}
+						if (!$Computers.Autotask_ID -or $Autotask_String -ne $Computers.Autotask_ID) {
+							if (!(Get-Member -inputobject $UpdatedComputer -name "Autotask_ID" -Membertype Properties)) {
+								$UpdatedComputer | Add-Member -NotePropertyName Autotask_ID -NotePropertyValue $null
+							}
+							$UpdatedComputer.Autotask_ID = $Autotask_String
+							$UpdateRequired = $true
+						}
+						if (!$Computers.ITG_ID -or $ITG_String -ne $Computers.ITG_ID) {
+							if (!(Get-Member -inputobject $UpdatedComputer -name "ITG_ID" -Membertype Properties)) {
+								$UpdatedComputer | Add-Member -NotePropertyName ITG_ID -NotePropertyValue $null
+							}
+							$UpdatedComputer.ITG_ID = $ITG_String
+							$UpdateRequired = $true
+						}
+						if ($SerialNum_String -ne $Computers.SerialNumber) {
+							$UpdatedComputer.SerialNumber = $SerialNum_String
+							$UpdateRequired = $true
+						}
+			
+						$ComputerID = $Computers[0].Id
+						if ($UpdateRequired) {
+							$UpdatedComputer.LastUpdated = $Now_UTC
+							Set-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Computers" -Id $ComputerID -DocumentBody ($UpdatedComputer | ConvertTo-Json) -PartitionKey 'computer' | Out-Null
+						}
+					}
+
+					if ($Domain -and $Domain -eq "AzureAD") { 
+						$DomainOrLocal = "AzureAD"
+					} elseif ($Domain -and $Domain -ne "WORKGROUP") {
+						$DomainOrLocal = "Domain"
+					} else { 
+						$DomainOrLocal = "Local"
+					}
+		
+					# Get the User ID, if not already in DB, add a new user
+					$User = $ExistingUsers | Where-Object { $_.Username -like $Username } | Sort-Object LastUpdated | Select-Object -First 1
+		
+					if (!$User) {
+						# Add user
+						$UserID = $([Guid]::NewGuid().ToString())
+						$User = @{
+							id = $UserID
+							Username = $Username
+							DomainOrLocal = $DomainOrLocal
+							Domain = $Domain
+							ADUsername = $null
+							O365Email = $null
+							ITG_ID = $null
+							LastUpdated = $Now_UTC
+							type = "user"
+						} | ConvertTo-Json
+						New-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Users" -DocumentBody $User -PartitionKey 'user' | Out-Null
+					} else {
+						# If changing fields, update in user audit as well
+						$User = $User | Select-Object Id, Domain, DomainOrLocal, Username, LastUpdated, type, O365Email, ITG_ID, ADUsername
+						$UserID = $User[0].Id
+						if (!$User.DomainOrLocal -or $User.Domain -ne $Domain -or $User.DomainOrLocal -ne $DomainOrLocal) {
+							$User.DomainOrLocal = $DomainOrLocal
+							$User.Domain = $Domain
+							$User.LastUpdated = $Now_UTC
+							Set-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Users" -Id $UserID -DocumentBody ($User | ConvertTo-Json) -PartitionKey 'user' | Out-Null
+						}
+					}
+
+					# If a usage entry already exists today, skip adding another
+					if (($ExistingUsageToday | Where-Object { $_.ComputerID -eq $Computers.id -and $_.UserID -eq $User.id } | Measure-Object).Count -gt 1) {
+						continue
+					}
+		
+					# Add a usage entry
+					$ID = $([Guid]::NewGuid().ToString())
+					$Usage = @{
+						id = $ID
+						ComputerID = $ComputerID
+						UserID = $UserID
+						UseDateTime = $LastActive
+						yearmonth = $Year_Month
+					} | ConvertTo-Json
+					New-CosmosDbDocument -Context $cosmosDbContext -Database $DB_Name -CollectionId "Usage" -DocumentBody $Usage -PartitionKey $Year_Month | Out-Null
+				}
+			}
+		
+			Write-Host "Usage Stats Saved!"
+			Write-Host "===================="
+			break
 		}
-	
-		Write-Host "Usage Stats Saved!"
-		Write-Host "===================="
 	}
 
 	# Update / Create the "Scripts - Last Run" ITG page which shows when the device audit (and other scripts) last ran
