@@ -1935,7 +1935,8 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 													$Matches[1]
 												}
 											}
-										}}, @{Name="SophosEndpointID"; E={ $_.udf.udf4 }}, @{Name="ToDelete"; E={ if ($_.udf.udf30 -eq "True") { $true } else { $false } }}, suspended
+										}}, @{Name="SophosEndpointID"; E={ $_.udf.udf4 }}, @{Name="ToDelete"; E={ if ($_.udf.udf30 -eq "True") { $true } else { $false } }}, suspended,
+										@{Name="Win11Compatible"; E={ $_.udf.udf15 }}
 	$RMM_DevicesHash = @{}
 	foreach ($Device in $RMM_Devices) { 
 		$RMM_DevicesHash[$Device."Device UID"] = $Device
@@ -6213,6 +6214,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		$BillingDevices = @()
 		$AllDevices = @()
 		$AssetReport = @()
+		$Win11AssetReport = @()
 		$Now = Get-Date
 
 		foreach ($Device in $MatchedDevices) {
@@ -6252,6 +6254,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				$WarrantyStart = $false
 				$WarrantyExpiry = $false
 				$ReplacementYear = $false
+				$Win11Compatibility = $false
 				$SophosTamperKey = $false
 				$SophosTamperStatus = $false
 				$AzureLastSignIn = $false
@@ -6278,6 +6281,12 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					$CPUs = @($RMMDevice.cpus.name)
 					$CPUCores = $RMMDevice.cpuCores
 					$RAM = [math]::Round($RMMDevice.memory / 1024 / 1024 / 1024) # bytes to GB
+					$Win11Compatibility = "Unknown"
+					if ($RMMDevice.Win11Compatible -like "Windows 11: NOT CAPABLE*" -or $RMMDevice.Win11Compatible -like  "*Windows 11 Prereq Fail*") { 
+						$Win11Compatibility = "No" 
+					} elseif ($RMMDevice.Win11Compatible -like "Windows 11: CAPABLE*" -or $RMMDevice.Win11Compatible -like "*Ready for Windows 11*") { 
+						$Win11Compatibility = "Yes" 
+					}
 
 					if ($LastUser -and $RMMDevice."Last User" -like "$($Hostname)\*") {
 						$LastUser = "$($LastUser) (Local)"
@@ -6672,6 +6681,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				if (!$WarrantyStart) { $WarrantyStart = "" }
 				if (!$WarrantyExpiry) { $WarrantyExpiry = "" }
 				if (!$ReplacementYear) { $ReplacementYear = "" }
+				if (!$Win11Compatibility) { $Win11Compatibility = "Unknown" }
 				if (!$SophosTamperKey) { $SophosTamperKey = "" }
 
 				# Count as billed if not inactive, ignore devices only in sophos and not seen in the past week as they were likely decommissioned, and
@@ -6789,6 +6799,34 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					"Replacement Budget" = ""
 					Notes = if ($BilledStr -ne "Yes") { "Last Seen: " + $NewestDate.ToString("yyyy-MM-dd") } else { "" }
 				}
+
+				if ($DeviceType -ne "Server" -and $OperatingSystem -like "*Windows*" -and $OperatingSystem -notlike "*Windows 11*") {
+					$Notes = if ($BilledStr -ne "Yes") { "Last Seen: " + $NewestDate.ToString("yyyy-MM-dd") } else { "" }
+					if ($Win11Compatibility -eq "No" -and $RMMDevice.Win11Compatible) {
+						if ($Notes) { $Notes += " | "}
+						$Notes += $RMMDevice.Win11Compatible
+					}
+					$Win11AssetReport += [PsCustomObject]@{
+						Device = $Hostname
+						Location = $Location
+						"Assigned User" = $AssignedUser
+						"Last Login" = $LastUser
+						"Active?" = if ($BilledStr -eq "Yes") { "X" } else { "" }
+						Make = $Manufacturer
+						Model = $Model
+						Serial = $SerialNumber
+						"Operating System" = $OperatingSystem
+						RAM = $RAM
+						Purchased = $WarrantyStart
+						"Warranty Expiry" = $WarrantyExpiry
+						"Age (years)" = $DeviceAge
+						"Windows 11 Compatible?" = $Win11Compatibility
+						"Replacement Year" = $ReplacementYear
+						"Suggested Replacement" = ""
+						"Replacement Budget" = ""
+						Notes = $Notes
+					}
+				}
 			}
 		}
 
@@ -6847,6 +6885,11 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 					"Servers - Physical" = @($AllServers | Where-Object { $_.Hostname -notlike "*BDR*" -and $_.Model -and $_.Model -notlike "*Virtual*" }).count
 					"Servers - Virtual" = @($AllServers | Where-Object { $_.Hostname -notlike "*BDR*" -and ($_.Model -like "*Virtual*" -or !$_.Model) }).count
 					"Servers - BDR" = @($AllServers | Where-Object { $_.Hostname -like "*BDR*" }).count
+					"Windows <10 Workstations" = @($Win11AssetReport | Where-Object { $_."Operating System" -notlike "*Windows 10*" }).count
+					"Windows 10 Workstations" = @($Win11AssetReport | Where-Object { $_."Operating System" -like "*Windows 10*" }).count
+					"Windows 10 Workstations - Upgradable" = @($Win11AssetReport | Where-Object { $_."Windows 11 Compatible?" -like "Yes" }).count
+					"Windows 10 Workstations - Win 11 Not Supported" = @($Win11AssetReport | Where-Object { $_."Windows 11 Compatible?" -like "No" }).count
+					"Windows 10 Workstations - Unknown Upgradability" = @($Win11AssetReport | Where-Object { $_."Windows 11 Compatible?" -like "Unknown" }).count
 				}
 			}
 
@@ -6933,6 +6976,43 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 			Add-ConditionalFormatting -Worksheet $ws_report -Address "J2:J$($rowCount+1)" -RuleType Equal -ForegroundColor black -BackgroundColor red -ConditionValue "2 GB"
 			Add-ConditionalFormatting -Worksheet $ws_report -Address "J2:J$($rowCount+1)" -RuleType Equal -ForegroundColor black -BackgroundColor red -ConditionValue "1 GB"
 			Add-ConditionalFormatting -Worksheet $ws_report -Address "J2:J$($rowCount+1)" -RuleType Equal -ForegroundColor black -BackgroundColor red -ConditionValue "0 GB"
+			
+			Close-ExcelPackage $excel
+
+			# Create/update a fourth excel document, the Windows 11 upgrade asset report
+			$FileName = "$($Company_Acronym)--Windows_11_Upgrade_Asset_Report.xlsx"
+			$Path = $PSScriptRoot + "\$FileName"
+			Remove-Item $Path -ErrorAction SilentlyContinue
+
+			$excel = $Win11AssetReport | Sort-Object -Property Device | Export-Excel $Path -WorksheetName "Asset Report" -AutoSize -AutoFilter -NoNumberConversion * -TableName "Win11AssetReport" -PassThru
+			$rowCount = ($Win11AssetReport | Measure-Object).Count
+			$curYear = get-date -Format yyyy
+			$ws_report = $excel.Workbook.Worksheets['Asset Report']
+			$ws_report.Cells["P2:P$($rowCount+1)"].Style.HorizontalAlignment="Center"
+			$OrangeColor = [System.Drawing.Color]::FromArgb(255,192,0)
+			$GreenColor = [System.Drawing.Color]::FromArgb(146,208,80)
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "O2:O$($rowCount+1)" -RuleType ContainsBlanks -StopIfTrue
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "O2:O$($rowCount+1)" -RuleType LessThanOrEqual -ForegroundColor black -BackgroundColor red -ConditionValue ($curYear - 3)
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "O2:O$($rowCount+1)" -RuleType Equal -ForegroundColor black -BackgroundColor $OrangeColor -ConditionValue ($curYear - 2)
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "O2:O$($rowCount+1)" -RuleType Equal -ForegroundColor black -BackgroundColor yellow -ConditionValue ($curYear - 1)
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "O2:O$($rowCount+1)" -RuleType GreaterThanOrEqual -ForegroundColor black -BackgroundColor $GreenColor -ConditionValue ($curYear)
+
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "I2:I$($rowCount+1)" -RuleType ContainsText -ForegroundColor black -BackgroundColor red -ConditionValue "Windows XP"
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "I2:I$($rowCount+1)" -RuleType ContainsText -ForegroundColor black -BackgroundColor red -ConditionValue "Windows Vista"
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "I2:I$($rowCount+1)" -RuleType ContainsText -ForegroundColor black -BackgroundColor red -ConditionValue "Windows 7"
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "I2:I$($rowCount+1)" -RuleType ContainsText -ForegroundColor black -BackgroundColor red -ConditionValue "Windows 8"
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "I2:I$($rowCount+1)" -RuleType ContainsText -ForegroundColor black -BackgroundColor red -ConditionValue "Windows 8.1"
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "I2:I$($rowCount+1)" -RuleType ContainsText -ForegroundColor black -BackgroundColor yellow -ConditionValue "Windows 10"
+
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "J2:J$($rowCount+1)" -RuleType Equal -ForegroundColor black -BackgroundColor red -ConditionValue "4 GB"
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "J2:J$($rowCount+1)" -RuleType Equal -ForegroundColor black -BackgroundColor red -ConditionValue "3 GB"
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "J2:J$($rowCount+1)" -RuleType Equal -ForegroundColor black -BackgroundColor red -ConditionValue "2 GB"
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "J2:J$($rowCount+1)" -RuleType Equal -ForegroundColor black -BackgroundColor red -ConditionValue "1 GB"
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "J2:J$($rowCount+1)" -RuleType Equal -ForegroundColor black -BackgroundColor red -ConditionValue "0 GB"
+
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "N2:N$($rowCount+1)" -RuleType ContainsText -ForegroundColor black -BackgroundColor red -ConditionValue "No"
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "N2:N$($rowCount+1)" -RuleType ContainsText -ForegroundColor black -BackgroundColor $GreenColor -ConditionValue "Yes"
+			Add-ConditionalFormatting -Worksheet $ws_report -Address "N2:N$($rowCount+1)" -RuleType ContainsText -ForegroundColor black -BackgroundColor yellow -ConditionValue "Unknown"
 			
 			Close-ExcelPackage $excel
 
@@ -7293,6 +7373,17 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				} else {
 					Move-Item -Path $Path -Destination $MoveAssetReport.Location -Force
 				}
+
+				$FileName = "$($Company_Acronym)--Windows_11_Upgrade_Asset_Report.xlsx"
+				$Path = $PSScriptRoot + "\$FileName"
+				if (Test-Path $Path) {
+					if ($MoveAssetReport.Copy) {
+						Copy-Item -Path $Path -Destination $MoveAssetReport.Location -Force
+					} else {
+						Move-Item -Path $Path -Destination $MoveAssetReport.Location -Force
+					}
+				}
+
 				$DeviceAuditSpreadsheetsUpdated = $true
 			}
 		} else {
