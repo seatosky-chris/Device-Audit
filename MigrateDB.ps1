@@ -62,7 +62,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 	try {
 		Get-CosmosDbDatabase -Context $cosmosDbContext -Id $DB_Name | Out-Null
 	} catch {
-		if ($_.Exception.Response.StatusCode -eq "NotFound") {
+		if ($_.Exception.Message -like "*(404) Not Found.") {
 			try {
 				New-CosmosDbDatabase -Context $cosmosDbContext -Id $DB_Name | Out-Null
 			} catch { 

@@ -3316,7 +3316,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		$null = Connect-AzAccount -ServicePrincipal -Credential $AzureCredentials_CosmosDB -Tenant $AzureAppCredentials_CosmosDB.TenantID -InformationAction SilentlyContinue
 
 		# Use a while loop and break at the end, this allows us to break out of it at any time if there is an issue updating the DB (which beats having a ton of nested for loops!)
-		:continueDBOperationswhile while ($true) {
+		:continueDBOperations while ($true) {
 			# Connect to Account and DB
 			$Account_Name = "stats-$($Company_Acronym.ToLower())"
 			$Account = Get-CosmosDbAccount -Name $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup 2>&1
@@ -3358,7 +3358,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				Get-CosmosDbDatabase -Context $cosmosDbContext -Id $DB_Name | Out-Null
 			} catch {
 				$AdditionalChecks = $true
-				if ($_.Exception.Response.StatusCode -eq "Forbidden") {
+				if ($_.Exception.Message -like "*(403) Forbidden.") {
 					$appObjectId = (Get-AzADServicePrincipal -ApplicationId $AzureAppCredentials_CosmosDB.AppID).Id
 					$CosmosDBRoles = Get-AzCosmosDBSqlRoleDefinition -ResourceGroupName $Database_Connection.ResourceGroup -AccountName $Account_Name
 					$CosmosDBRoles | ForEach-Object {
@@ -3369,7 +3369,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 							PrincipalId = $appObjectId
 							Scope = $Account.Id
 						}    
-						New-AzCosmosDBSqlRoleAssignment @parameters
+						New-AzCosmosDBSqlRoleAssignment @parameters -Verbose
 					}
 				}
 			}
@@ -3379,9 +3379,9 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				try {
 					Get-CosmosDbDatabase -Context $cosmosDbContext -Id $DB_Name | Out-Null
 				} catch {
-					if ($_.Exception.Response.StatusCode -eq "Forbidden") {
-						Write-PSFMessage -Level Error -Message "Could not query the CosmosDB database despire setting up permissions. Access is likely forbidden due to the Cosmos Firewall. Please verify the DB's networking has Public Network Access allowed on All Networks."
-						Write-Host "Could not query the CosmosDB database despire setting up permissions. Access is likely forbidden due to the Cosmos Firewall. Please verify the DB's networking has Public Network Access allowed on All Networks." -ForegroundColor Red
+					if ($_.Exception.Message -like "*(403) Forbidden.") {
+						Write-PSFMessage -Level Error -Message "Could not query the CosmosDB database despite setting up permissions. Access is likely forbidden due to the Cosmos Firewall. Please verify the DB's networking has Public Network Access allowed on All Networks."
+						Write-Host "Could not query the CosmosDB database despite setting up permissions. Access is likely forbidden due to the Cosmos Firewall. Please verify the DB's networking has Public Network Access allowed on All Networks." -ForegroundColor Red
 						break continueDBOperations
 					}
 				}
@@ -3390,7 +3390,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 				try {
 					Get-CosmosDbDatabase -Context $cosmosDbContext -Id $DB_Name | Out-Null
 				} catch {
-					if ($_.Exception.Response.StatusCode -eq "NotFound") {
+					if ($_.Exception.Message -like "*(404) Not Found.") {
 						try {
 							if (!$cosmosDbContext_management) {
 								$cosmosDbContext_management = New-CosmosDbContext -Account $Account_Name -ResourceGroupName $Database_Connection.ResourceGroup -MasterKeyType PrimaryMasterKey -BackoffPolicy $backoffPolicy
