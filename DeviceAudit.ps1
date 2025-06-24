@@ -736,7 +736,7 @@ foreach ($Device in $SC_Devices) {
 	})
 	$MacRelated_SCDevices = $MacRelated_SCDevices | Where-Object {
 		$Related_RMMDeviceMacs = $RMM_Devices.MacAddresses | Where-Object { $_.macAddress -like $Device.GuestHardwareNetworkAddress }
-		if (($Related_RMMDeviceMacs | Measure-Object).Count -gt 0 -and $Related_RMMDeviceMacs.instance -notlike "*USB*" -and $Related_RMMDeviceMacs.instance -notlike "*Ethernet Adapter*") {
+		if (($Related_RMMDeviceMacs | Measure-Object).Count -gt 0 -and $Related_RMMDeviceMacs.instance -notlike "*USB*" -and $Related_RMMDeviceMacs.instance -notlike "*Ethernet Adapter*" -and $ConnectedMac.instance -like "*Plugable Ethernet*") {
 			$_
 			return
 		}
@@ -847,7 +847,7 @@ foreach ($MatchedDevice in $MatchedDevices) {
 					$MacRelated_RMMDevices = $MacRelated_RMMDevices | Where-Object { 
 						# Remove any usb adapter mac matches unless the hostname also matches
 						$ConnectedMac = $_.MacAddresses | Where-Object { $_.macAddress -like $Device.GuestHardwareNetworkAddress }
-						if (($ConnectedMac.instance -like "*USB*" -or $ConnectedMac.instance -like "*Ethernet Adapter*" -or $ConnectedMac.instance -like "*Modem Mobile Broadband Device*") -and $Device.Name -notlike $_."Device Hostname" -and $Device.GuestMachineName -notlike $_."Device Hostname") {
+						if (($ConnectedMac.instance -like "*USB*" -or $ConnectedMac.instance -like "*Ethernet Adapter*" -or $ConnectedMac.instance -like "*Plugable Ethernet*" -or $ConnectedMac.instance -like "*Modem Mobile Broadband Device*") -and $Device.Name -notlike $_."Device Hostname" -and $Device.GuestMachineName -notlike $_."Device Hostname") {
 							$false
 							return
 						} else {
@@ -902,7 +902,7 @@ foreach ($MatchedDevice in $MatchedDevices) {
 			}
 			if (($Related_RMMDevices_Filtered | Measure-Object).Count -gt 1) {
 				# If there is still more than 1 match, try removing any matches based on a USB network adapters mac address (but still keep them if the hostname matches)
-				$Related_RMMDevices_Filtered = $Related_RMMDevices_Filtered | Where-Object { $_."Device Hostname" -eq $Device.Name -or $_."Device Hostname" -eq $Device.GuestMachineName -or $_.MacAddresses.macAddress -notlike $Device.GuestHardwareNetworkAddress -or ($_.MacAddresses.macAddress -like $Device.GuestHardwareNetworkAddress -and $_.MacAddresses.instance -notlike "*USB*" -and $_.MacAddresses.instance -notlike "*Ethernet Adapter*") }
+				$Related_RMMDevices_Filtered = $Related_RMMDevices_Filtered | Where-Object { $_."Device Hostname" -eq $Device.Name -or $_."Device Hostname" -eq $Device.GuestMachineName -or $_.MacAddresses.macAddress -notlike $Device.GuestHardwareNetworkAddress -or ($_.MacAddresses.macAddress -like $Device.GuestHardwareNetworkAddress -and $_.MacAddresses.instance -notlike "*USB*" -and $_.MacAddresses.instance -notlike "*Ethernet Adapter*" -and $ConnectedMac.instance -like "*Plugable Ethernet*") }
 				if (($Related_RMMDevices_Filtered | Measure-Object).Count -gt 0) {
 					$Related_RMMDevices = $Related_RMMDevices_Filtered
 				}

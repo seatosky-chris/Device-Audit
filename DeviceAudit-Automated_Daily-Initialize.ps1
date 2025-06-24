@@ -1482,7 +1482,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						$MacRelated_RMMDevices = $MacRelated_RMMDevices | Where-Object { 
 							# Remove any usb adapter mac matches unless the hostname also matches
 							$ConnectedMac = $_.MacAddresses | Where-Object { $_.macAddress -like $Device.GuestHardwareNetworkAddress }
-							if (($ConnectedMac.instance -like "*USB*" -or $ConnectedMac.instance -like "*Ethernet Adapter*" -or $ConnectedMac.instance -like "*Modem Mobile Broadband Device*") -and $Device.Name -notlike $_."Device Hostname" -and $Device.GuestMachineName -notlike $_."Device Hostname") {
+							if (($ConnectedMac.instance -like "*USB*" -or $ConnectedMac.instance -like "*Ethernet Adapter*" -or $ConnectedMac.instance -like "*Plugable Ethernet*" -or $ConnectedMac.instance -like "*Modem Mobile Broadband Device*") -and $Device.Name -notlike $_."Device Hostname" -and $Device.GuestMachineName -notlike $_."Device Hostname") {
 								$false
 								return
 							} else {
