@@ -23,7 +23,8 @@ param(
 # Setup logging
 If (Get-Module -ListAvailable -Name "PSFramework") {Import-module PSFramework} Else { install-module PSFramework -Force; import-module PSFramework}
 $logFile = Join-Path -path "$PSScriptRoot\ErrorLogs" -ChildPath "log-$(Get-date -f 'yyyyMMddHHmmss').txt";
-Set-PSFLoggingProvider -Name logfile -FilePath $logFile -Enabled $true;
+$logRotatePath = Join-Path -path "$PSScriptRoot\ErrorLogs" -ChildPath "log-*.txt";
+Set-PSFLoggingProvider -Name logfile -FilePath $logFile -LogRotatePath $logRotatePath -Enabled $true -Wait;
 
 Write-PSFMessage -Level Verbose -Message "Starting cleanup on: $($companies | ConvertTo-Json)"
 $CompaniesToAudit = [System.Collections.Generic.List[string]]::new();
