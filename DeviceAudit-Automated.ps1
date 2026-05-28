@@ -1556,6 +1556,47 @@ if ($true) {
 		}
 		return $false
 	}
+
+	function Test-IsPrivateIP {
+		param (
+			[string]$IPAddress
+		)
+
+		if ([string]::IsNullOrEmpty($IPAddress)) {
+			Write-Error "IPAddress parameter cannot be null or empty."
+			return $false
+		}
+
+		try {
+			$ip = [System.Net.IPAddress]::Parse($IPAddress)
+		}
+		catch {
+			Write-Error "Invalid IP address format: $IPAddress"
+			return $false
+		}
+
+		$ipBytes = $ip.GetAddressBytes()
+
+		# Check for IPv4 private ranges
+		if ($ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
+			# 10.0.0.0/8
+			if ($ipBytes[0] -eq 10) {
+				return $true
+			}
+			# 172.16.0.0/12
+			if ($ipBytes[0] -eq 172 -and $ipBytes[1] -ge 16 -and $ipBytes[1] -le 31) {
+				return $true
+			}
+			# 192.168.0.0/16
+			if ($ipBytes[0] -eq 192 -and $ipBytes[1] -eq 168) {
+				return $true
+			}
+		}
+		# You can extend this to check for IPv6 private ranges (ULA) if needed
+		# For example: fc00::/7 (fc00:: to fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff)
+
+		return $false
+	}
 }
 
 # Add a last seen field to Ninite devices
@@ -7537,6 +7578,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 
 					if ($Matches -and $Matches.value) {
 						$IPs = @($Matches.Value)
+						$IPs = $IPs | Where-Object { !(Test-IsPrivateIP -IPAddress $_) }
 						foreach ($IP in $IPs) {
 							$FoundIPs = @()
 							if ($IP -like "*-*" -and $IP -like "*/*") {
@@ -7563,6 +7605,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 								$FoundIPs += $IP
 							}
 
+							$FoundIPs = $FoundIPs | Where-Object { !(Test-IsPrivateIP -IPAddress $_) }
 							$IPs_Parsed += $FoundIPs
 							
 							foreach ($FoundIP in $FoundIPs) {
