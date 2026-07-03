@@ -1385,6 +1385,42 @@ if ($true) {
 		}
 	}
 
+	function restart_rmm_using_sc($SC_ID, $SCWebSession) {
+		# Get an anti-forgery token from the website
+		$Response = Invoke-WebRequest "$($SCLogin.URL)/Host#Access/All%20Machines//$SC_ID" -UseBasicParsing -WebSession $SCWebSession -Method 'POST' -ContentType 'application/json'
+		$Response.RawContent -match '"antiForgeryToken":"(.+?)"' | Out-Null
+		$AntiForgeryToken = $matches[1]
+
+		if ($AntiForgeryToken) {
+			$RMMRestartCmd = "#timeout=10000\npowershell -command \`"Restart-Service 'CagService';\`""
+
+			$FormBody = '[["All Machines"],[{"SessionID": "' + $SC_ID + '","EventType":44,"Data":"' + $RMMRestartCmd + '"}]]'
+			$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/PageService.ashx/AddSessionEvents" -UseBasicParsing -WebSession $SCWebSession -Headers @{"X-Anti-Forgery-Token" = $AntiForgeryToken} -Body $FormBody -Method 'POST' -ContentType 'application/json'
+			return $true
+		} else {
+			Write-Warning "Could not get an anti-forgery token from Screenconnect. Failed to restart RMM for SC device ID: $SC_ID"
+			return $false
+		}
+	}
+
+	function restart_rmm_using_sc_mac($SC_ID, $SCWebSession) {
+		# Get an anti-forgery token from the website
+		$Response = Invoke-WebRequest "$($SCLogin.URL)/Host#Access/All%20Machines//$SC_ID" -UseBasicParsing -WebSession $SCWebSession -Method 'POST' -ContentType 'application/json'
+		$Response.RawContent -match '"antiForgeryToken":"(.+?)"' | Out-Null
+		$AntiForgeryToken = $matches[1]
+	
+		if ($AntiForgeryToken) {
+			$RMMInstallCmd = "#timeout=10000\n#!bash\ncd /Applications/\`"AEM Agent.app\`"/Contents/Resources\n./restart_cag"
+	
+			$FormBody = '[["All Machines"],[{"SessionID": "' + $SC_ID + '","EventType":44,"Data":"' + $RMMInstallCmd + '"}]]'
+			$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/PageService.ashx/AddSessionEvents" -UseBasicParsing -WebSession $SCWebSession -Headers @{"X-Anti-Forgery-Token" = $AntiForgeryToken} -Body $FormBody -Method 'POST' -ContentType 'application/json'
+			return $true
+		} else {
+			Write-Warning "Could not get an anti-forgery token from Screenconnect. Failed to install RMM for SC device ID: $SC_ID"
+			return $false
+		}
+	}
+
 	function is_sc_installed($RMM_Device) {
 		$DeviceSoftware = Get-DrmmAuditDeviceSoftware -DeviceUid $RMM_Device."Device UID"
 		if (($DeviceSoftware | Where-Object { $_.name -like "ScreenConnect Client*" } | Measure-Object).Count -gt 0) {
@@ -1469,6 +1505,27 @@ if ($true) {
 			if ($Job -and $Job.job -and $Job.job.uid) {
 				$Removed = remove_device_from_install_queue -RMM_ID $RMM_Device."Device UID" -ToInstall "sc"
 				log_recent_rmm_job -RMM_Device $RMM_Device -JobType "install_sc" -JobID $Job.job.uid
+				return $true
+			}
+		}
+		return $false
+	}
+
+	function restart_sc_using_rmm($RMM_Device) {
+		if (is_existing_rmm_job_active -RMM_Device $RMM_Device -JobType "restart_sc") {
+			return $false
+		}
+
+		if ($RMM_Device."Operating System" -like "*Windows*" -and (is_sc_installed -RMM_Device $RMM_Device)) {
+			$Job = Set-DrmmDeviceQuickJob -DeviceUid $RMM_Device."Device UID" -jobName "Restart ScreenConnect on $($RMM_Device."Device Hostname")" -ComponentName "Restart ScreenConnect [WIN]"
+			if ($Job -and $Job.job -and $Job.job.uid) {
+				log_recent_rmm_job -RMM_Device $RMM_Device -JobType "restart_sc" -JobID $Job.job.uid
+				return $true
+			}
+		} elseif ($RMM_Device."Operating System" -like "*Mac OS*") {
+			$Job = Set-DrmmDeviceQuickJob -DeviceUid $RMM_Device."Device UID" -jobName "Restart ScreenConnect on $($RMM_Device."Device Hostname")" -ComponentName "Restart ScreenConnect [MacOS]"
+			if ($Job -and $Job.job -and $Job.job.uid) {
+				log_recent_rmm_job -RMM_Device $RMM_Device -JobType "restart_sc" -JobID $Job.job.uid
 				return $true
 			}
 		}
@@ -2444,6 +2501,7 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 		foreach ($Device in $MatchedDevices) {
 			$ActivityComparison = $Device.activity_comparison
 			$Activity = $ActivityComparison.Values | Sort-Object last_active
+			$MarkedBroken = $false
 
 			if (($Activity | Measure-Object).count -gt 1) {
 				$LastIndex = ($Activity | Measure-Object).count-1
@@ -2681,7 +2739,164 @@ foreach ($ConfigFile in $CompaniesToAudit) {
 						$BrokenConnection.RepairTicket = if (($RepairTickets_Subset | Measure-Object).Count -gt 0) { $RepairTickets_Subset.ticketNumber -join ", " }
 						$BrokenConnection.Link = $Link
 						$BrokenConnections += $BrokenConnection
+						$MarkedBroken = $true
 					}
+				}
+			}
+
+			# Also check last seen difference between SC and RMM, if >24 hours, try restarting the inactive service
+			if (($Activity | Measure-Object).count -gt 1 -and $ActivityComparison.rmm -and $ActivityComparison.rmm.last_active -and $ActivityComparison.sc -and $ActivityComparison.sc.last_active -and !$MarkedBroken -and (($ActivityComparison.rmm.last_active -ge (Get-Date).AddHours(-24)) -or ($ActivityComparison.sc.last_active -ge (Get-Date).AddHours(-24)))) {
+				if ($ActivityComparison.sc.last_active -gt $ActivityComparison.rmm.last_active) {
+					$Timespan = New-TimeSpan -Start $ActivityComparison.rmm.last_active -End $ActivityComparison.sc.last_active
+				} else {
+					$Timespan = New-TimeSpan -Start $ActivityComparison.sc.last_active -End $ActivityComparison.rmm.last_active
+				}
+
+				if ($Timespan.Hours -gt 24) {
+					$Hostname = ''
+					if ($ActivityComparison.sc.last_active -lt $ActivityComparison.rmm.last_active) {
+						$BrokenDeviceType = "sc"
+					} else {
+						$BrokenDeviceType = "rmm"
+					}
+
+					$DeviceID = $ActivityComparison[$BrokenDeviceType].id
+					if ($BrokenDeviceType -eq 'sc') {
+						$Hostname = ($SC_DevicesHash[$DeviceID]).Name
+					} elseif ($BrokenDeviceType -eq 'rmm') {
+						$RMMDevice = $RMM_DevicesHash[$DeviceID]
+						$Hostname = $RMMDevice."Device Hostname"
+					}
+
+					$Link = ''
+					if ($BrokenDeviceType -eq 'sc') {
+						$Link = "$($SCLogin.URL)/Host#Access/All%20Machines/$($Hostname)/$($DeviceID)"
+					} elseif ($BrokenDeviceType -eq 'rmm') {
+						if ($RMMDevice.url) {
+							$Link = $RMMDevice.url
+						} else {
+							$Link = "https://$($DattoAPIKey.Region).centrastage.net/csm/search?qs=uid%3A$($DeviceID)"
+						}
+					}
+
+
+					$AutoFix = $false
+					if (!$ReadOnly -and $BrokenDeviceType -eq 'rmm' -and $RMM_ID -and ($Device.sc_matches | Measure-Object).Count -gt 0 -and $SCLogin.Username -and $SCWebSession -and $Device.id -notin $MoveDevices.ID) {
+						# Device broken in rmm but is in SC and we are using the SC api account, have the rmm org id, and this device is not in the $MoveDevices array (devices that look like they dont belong)
+						$SC_Device = @()
+						foreach ($DeviceID in $Device.sc_matches) {
+							$SC_Device += $SC_DevicesHash[$DeviceID]
+						}
+						
+						# Only continue if the device was seen recently in SC (this will only work if it is active) and is using Windows
+						foreach ($SCDevice in $SC_Device) {
+							$LogParams = @{
+								ServiceTarget = "sc"
+								SC_Device_ID = $SCDevice.SessionID
+								ChangeType = "restart_rmm"
+								Hostname = $SCDevice.Name
+							}
+							$AttemptCount = log_attempt_count @LogParams -LogHistory $LogHistory
+							$EmailError = "RMM may be broken on $($LogParams.Hostname). It has been inactive for over 24 hours but is still active in SC. The Device Audit script has tried to restart RMM via SC $AttemptCount times now but it has not succeeded."
+							$LogParams.RMM_Device_ID = $Device.rmm_matches
+							$LogParams.Sophos_Device_ID = $Device.sophos_matches
+							$LogParams.Reason = "RMM connection inactive for >24 hours"
+
+							if ($SCDevice.GuestOperatingSystemName -like "*Windows*" -and $SCDevice.GuestOperatingSystemName -notlike "*Windows Embedded*") {
+								if (restart_rmm_using_sc -SC_ID $SCDevice.SessionID -SCWebSession $SCWebSession) {
+									$AutoFix = $true
+									check_failed_attempts @LogParams -LogHistory $LogHistory -Company_Acronym $Company_Acronym -ErrorMessage $EmailError
+									log_change @LogParams -Company_Acronym $Company_Acronym
+								}
+								if ($AttemptCount -gt 3 -and $Timespan.Hours -gt 48) {
+									# If we tried restarting 3x already, then try a reinstall instead
+									if ($SCDevice.GuestLastSeen -gt (Get-Date).AddHours(-3)) {
+										if ($AttemptCount -gt 6) {
+											uninstall_rmm_using_sc -SC_ID $SCDevice.SessionID -SCWebSession $SCWebSession
+										}
+										install_rmm_using_sc -SC_ID $SCDevice.SessionID -RMM_ORG_ID $RMM_ID -SCWebSession $SCWebSession										
+									} else {
+										add_device_to_install_queue -SC_ID $SCDevice.SessionID -ToInstall 'rmm'
+									}
+								}
+							} elseif ($SCDevice.GuestOperatingSystemName -like "*Mac OS*") {
+								if (restart_rmm_using_sc_mac -SC_ID $SCDevice.SessionID -SCWebSession $SCWebSession) {
+									$AutoFix = $true
+									check_failed_attempts @LogParams -LogHistory $LogHistory -Company_Acronym $Company_Acronym -ErrorMessage $EmailError
+									log_change @LogParams -Company_Acronym $Company_Acronym
+								}
+								if ($AttemptCount -gt 3 -and $Timespan.Hours -gt 48) {
+									if ($SCDevice.GuestLastSeen -gt (Get-Date).AddHours(-3)) {
+										install_rmm_using_sc_mac -SC_ID $SCDevice.SessionID -RMM_ORG_ID $RMM_ID -SCWebSession $SCWebSession
+									} else {
+										add_device_to_install_queue -SC_ID $SCDevice.SessionID -ToInstall 'rmm'
+									}
+								}
+							} 
+						}
+					}
+
+					if (!$ReadOnly -and $BrokenDeviceType -eq 'sc' -and $RMM_ID -and ($Device.rmm_matches | Measure-Object).Count -gt 0 -and $Device.id -notin $MoveDevices.ID) {
+						# Device broken in sc but is in RMM and we are using the rmm api, and this device is not in the $MoveDevices array (devices that look like they dont belong)
+						$RMM_Device = @()
+						foreach ($DeviceID in $Device.rmm_matches) {
+							$RMM_Device += $RMM_DevicesHash[$DeviceID]
+						}
+
+						# Only continue if the device was seen in RMM in the last 24 hours
+						foreach ($RMMDevice in $RMM_Device) {
+							if ($RMMDevice.suspended -ne "True") {
+								$LogParams = @{
+									ServiceTarget = "rmm"
+									RMM_Device_ID = $RMMDevice."Device UID"
+									ChangeType = "restart_sc"
+									Hostname = $RMMDevice."Device Hostname"
+								}
+								$AttemptCount = log_attempt_count @LogParams -LogHistory $LogHistory
+
+								if (restart_sc_using_rmm -RMM_Device $RMMDevice) {
+									$AutoFix = $true
+									$EmailError = "ScreenConnect may be broken on $($LogParams.Hostname). It has been inactive for over 24 hours but is still active in RMM. The Device Audit script has tried to restart RMM via SC $AttemptCount times now but it has not succeeded."
+									$LogParams.SC_Device_ID = $Device.sc_matches
+									$LogParams.Sophos_Device_ID = $Device.sophos_matches
+									$LogParams.Reason = "SC connection inactive for >24 hours"
+									check_failed_attempts @LogParams -LogHistory $LogHistory -Company_Acronym $Company_Acronym -ErrorMessage $EmailError
+									log_change @LogParams -Company_Acronym $Company_Acronym
+								}
+
+								if ($AttemptCount -gt 3 -and $Timespan.Hours -gt 48) {
+									# If we tried restarting 3x already, then try a reinstall instead
+									if ($RMMDevice.Status -eq "Online" -or $RMMDevice."Last Seen" -eq "Currently Online" -or ($RMMDevice."Last Seen" -as [DateTime]) -gt (Get-Date).AddHours(-24)) {
+										if ($AttemptCount -gt 6) {
+											uninstall_sc_using_rmm -RMM_Device $RMMDevice
+										}
+										install_sc_using_rmm -RMM_Device $RMMDevice
+									} else {
+										add_device_to_install_queue -RMM_ID $RMMDevice."Device UID" -ToInstall 'sc'
+									}
+								}
+							}
+						}
+					}
+
+					$RepairTickets_Subset = @()
+					if ($BrokenDeviceType -in @("rmm", "sc", "sophos", "ninite")) {
+						$RepairTickets_Subset = repair_tickets -ServiceTarget $BrokenDeviceType -Hostname $Hostname
+					}
+
+					$BrokenConnection = [PsCustomObject]@{
+						BrokenType = $BrokenDeviceType
+						Hostname = $Hostname
+						LastActive = $Activity[$i].last_active
+						AutoFix_Attempted = "$($AutoFix) (Restart)"
+						SC_Time = if ($ActivityComparison.sc) { $ActivityComparison.sc[0].last_active } else { "NA" }
+						RMM_Time = if ($ActivityComparison.rmm) { $ActivityComparison.rmm[0].last_active } else { "NA" }
+						Sophos_Time = if ($ActivityComparison.sophos) { $ActivityComparison.sophos[0].last_active } else { "NA" }
+						RepairTicket = if (($RepairTickets_Subset | Measure-Object).Count -gt 0) { $RepairTickets_Subset.ticketNumber -join ", " } else { "NA" }
+						Link = $Link
+					}
+
+					$BrokenConnections += $BrokenConnection
 				}
 			}
 		}
