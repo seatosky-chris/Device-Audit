@@ -212,7 +212,7 @@ if ($Ninite_Login.Email) {
 		}
 
 		# Get the xsrf token from the form
-		$NiniteSignInPage = Invoke-WebRequest "$($Ninite_Login.BaseURI)signin/" -SessionVariable 'NiniteWebSession'
+		$NiniteSignInPage = Invoke-WebRequest "$($Ninite_Login.BaseURI)signin/" -SessionVariable 'NiniteWebSession' -UseBasicParsing
 		$XSRFToken = ($NiniteSignInPage.InputFields | Where-Object { $_.name -eq "_xsrf" }).value
 
 		if (!$XSRFToken) {
@@ -230,7 +230,7 @@ if ($Ninite_Login.Email) {
 			}
 
 			try {
-				$NiniteAuthResponse = Invoke-WebRequest "$($Ninite_Login.BaseURI)signin/" -WebSession $NiniteWebSession -Body $FormBody -Method 'POST' -ContentType 'application/x-www-form-urlencoded'
+				$NiniteAuthResponse = Invoke-WebRequest "$($Ninite_Login.BaseURI)signin/" -UseBasicParsing -WebSession $NiniteWebSession -Body $FormBody -Method 'POST' -ContentType 'application/x-www-form-urlencoded'
 			} catch {
 				$attempt--
 				Write-Host "Failed to connect to: Ninite"
@@ -258,7 +258,7 @@ if ($Ninite_Login.Email) {
 				}
 
 				try {
-					$NiniteAuthResponse = Invoke-WebRequest "$($Ninite_Login.BaseURI)me/2fa/challenge" -WebSession $NiniteWebSession -Body $FormBody -Method 'POST' -ContentType 'application/x-www-form-urlencoded'
+					$NiniteAuthResponse = Invoke-WebRequest "$($Ninite_Login.BaseURI)me/2fa/challenge" -UseBasicParsing -WebSession $NiniteWebSession -Body $FormBody -Method 'POST' -ContentType 'application/x-www-form-urlencoded'
 				} catch {
 					$attempt--
 					Write-Host "Failed to connect to: Ninite"
@@ -308,7 +308,7 @@ while ($attempt -ge 0) {
 	) | ConvertTo-Json
 
 	try {
-		$AuthResponse = Invoke-WebRequest "$($SCLogin.URL)/Services/AuthenticationService.ashx/TryLogin" -SessionVariable 'SCWebSession' -Body $FormBody -Method 'POST' -ContentType 'application/json'
+		$AuthResponse = Invoke-WebRequest "$($SCLogin.URL)/Services/AuthenticationService.ashx/TryLogin" -UseBasicParsing -SessionVariable 'SCWebSession' -Body $FormBody -Method 'POST' -ContentType 'application/json'
 	} catch {
 		$attempt--
 		Write-PSFMessage -Level Error -Message "Failed to connect to: ScreenConnect"
@@ -328,7 +328,7 @@ while ($attempt -ge 0) {
 	}
 
 	# Download the full device list report and then import it
-	$Response = Invoke-WebRequest "$($SCLogin.URL)/Report.csv?ReportType=Session&SelectFields=SessionID&SelectFields=Name&SelectFields=GuestMachineName&SelectFields=GuestMachineSerialNumber&SelectFields=GuestHardwareNetworkAddress&SelectFields=GuestOperatingSystemName&SelectFields=GuestLastActivityTime&SelectFields=GuestInfoUpdateTime&SelectFields=GuestLastBootTime&SelectFields=GuestLoggedOnUserName&SelectFields=GuestLoggedOnUserDomain&SelectFields=GuestMachineManufacturerName&SelectFields=GuestMachineModel&SelectFields=GuestMachineDescription&SelectFields=CustomProperty1&SelectFields=GuestSystemMemoryTotalMegabytes&SelectFields=GuestProcessorName&SelectFields=GuestProcessorVirtualCount&Filter=SessionType%20%3D%20'Access'%20AND%20NOT%20IsEnded&AggregateFilter=&ItemLimit=100000" -WebSession $SCWebSession
+	$Response = Invoke-WebRequest "$($SCLogin.URL)/Report.csv?ReportType=Session&SelectFields=SessionID&SelectFields=Name&SelectFields=GuestMachineName&SelectFields=GuestMachineSerialNumber&SelectFields=GuestHardwareNetworkAddress&SelectFields=GuestOperatingSystemName&SelectFields=GuestLastActivityTime&SelectFields=GuestInfoUpdateTime&SelectFields=GuestLastBootTime&SelectFields=GuestLoggedOnUserName&SelectFields=GuestLoggedOnUserDomain&SelectFields=GuestMachineManufacturerName&SelectFields=GuestMachineModel&SelectFields=GuestMachineDescription&SelectFields=CustomProperty1&SelectFields=GuestSystemMemoryTotalMegabytes&SelectFields=GuestProcessorName&SelectFields=GuestProcessorVirtualCount&Filter=SessionType%20%3D%20'Access'%20AND%20NOT%20IsEnded&AggregateFilter=&ItemLimit=100000" -UseBasicParsing -WebSession $SCWebSession
 	$SC_Devices_Full = $Response.Content | ConvertFrom-Csv
 
 	# If bad results
@@ -371,7 +371,7 @@ if ($NiniteAuthResponse) {
 		params = @{}
 	} | ConvertTo-Json
 
-	$NiniteResponse = Invoke-WebRequest "$($Ninite_Login.BaseURI)remote/rpc_web" -WebSession $NiniteWebSession -Headers $NiniteHeader -Body $FormBody -Method 'POST' -ContentType 'application/json; charset=utf-8'
+	$NiniteResponse = Invoke-WebRequest "$($Ninite_Login.BaseURI)remote/rpc_web" -UseBasicParsing -WebSession $NiniteWebSession -Headers $NiniteHeader -Body $FormBody -Method 'POST' -ContentType 'application/json; charset=utf-8'
 	$Ninite_OrgInfo = $NiniteResponse.Content | ConvertFrom-Json
 
 
@@ -389,7 +389,7 @@ if ($NiniteAuthResponse) {
 			}
 		} | ConvertTo-Json
 
-		$NiniteResponse = Invoke-WebRequest "$($Ninite_Login.BaseURI)remote/rpc_web" -WebSession $NiniteWebSession -Headers $NiniteHeader -Body $FormBody -Method 'POST' -ContentType 'application/json; charset=utf-8'
+		$NiniteResponse = Invoke-WebRequest "$($Ninite_Login.BaseURI)remote/rpc_web" -UseBasicParsing -WebSession $NiniteWebSession -Headers $NiniteHeader -Body $FormBody -Method 'POST' -ContentType 'application/json; charset=utf-8'
 		$Ninite_Machines += ($NiniteResponse.Content | ConvertFrom-Json).result
 		Start-Sleep -Seconds 1
 	}
@@ -1124,13 +1124,13 @@ if ($true) {
 	# Deletes a device from ScreenConnect
 	function delete_from_sc($SC_ID, $SCWebSession) {
 		# Get an anti-forgery token from the website
-		$Response = Invoke-WebRequest "$($SCLogin.URL)/Host#Access/All%20Machines//$SC_ID" -WebSession $SCWebSession -Method 'POST' -ContentType 'application/json'
+		$Response = Invoke-WebRequest "$($SCLogin.URL)/Host#Access/All%20Machines//$SC_ID" -UseBasicParsing -WebSession $SCWebSession -Method 'POST' -ContentType 'application/json'
 		$Response.RawContent -match '"antiForgeryToken":"(.+?)"' | Out-Null
 		$AntiForgeryToken = $matches[1]
 
 		if ($AntiForgeryToken) {
 			$FormBody = '[["All Machines"],[{"SessionID": "' + $SC_ID + '","EventType":21,"Data":null}]]'
-			$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/PageService.ashx/AddSessionEvents" -WebSession $SCWebSession -Headers @{"X-Anti-Forgery-Token" = $AntiForgeryToken} -Body $FormBody -Method 'POST' -ContentType 'application/json'
+			$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/PageService.ashx/AddSessionEvents" -UseBasicParsing -WebSession $SCWebSession -Headers @{"X-Anti-Forgery-Token" = $AntiForgeryToken} -Body $FormBody -Method 'POST' -ContentType 'application/json'
 			$Removed = remove_device_from_install_queue -SC_ID $SC_ID -ToInstall $false
 			return $true
 		} else {
@@ -1188,7 +1188,7 @@ if ($true) {
 		} | ConvertTo-Json
 	
 		try {
-			$NiniteResponse = Invoke-WebRequest "$($Ninite_Login.BaseURI)remote/rpc_web" -WebSession $NiniteWebSession -Headers $NiniteHeader -Body $FormBody -Method 'POST' -ContentType 'application/json; charset=utf-8'
+			$NiniteResponse = Invoke-WebRequest "$($Ninite_Login.BaseURI)remote/rpc_web" -UseBasicParsing -WebSession $NiniteWebSession -Headers $NiniteHeader -Body $FormBody -Method 'POST' -ContentType 'application/json; charset=utf-8'
 		} catch {
 			Write-Warning "Could not delete device '$($Ninite_ID)' from Ninite."
 			return $false
@@ -1330,7 +1330,7 @@ if ($true) {
 
 	function uninstall_rmm_using_sc($SC_ID, $SCWebSession) {
 		# Get an anti-forgery token from the website
-		$Response = Invoke-WebRequest "$($SCLogin.URL)/Host#Access/All%20Machines//$SC_ID" -WebSession $SCWebSession -Method 'POST' -ContentType 'application/json'
+		$Response = Invoke-WebRequest "$($SCLogin.URL)/Host#Access/All%20Machines//$SC_ID" -UseBasicParsing -WebSession $SCWebSession -Method 'POST' -ContentType 'application/json'
 		$Response.RawContent -match '"antiForgeryToken":"(.+?)"' | Out-Null
 		$AntiForgeryToken = $matches[1]
 
@@ -1338,7 +1338,7 @@ if ($true) {
 			$RMMUninstallCmd = "#timeout=100000\n@echo off\ntaskkill /f /im gui.exe 2>nul\necho Waiting for Datto RMM to be removed...\n\`"C:\\Program Files (x86)\\CentraStage\\uninst.exe\`" /S 2>nul\npowershell -ExecutionPolicy Bypass -Command \`"Start-Sleep -Seconds 10\`"\nrmdir \`"C:\\Program Files (x86)\\CentraStage\\\`" /S /Q 2>nul\nrmdir \`"C:\\Windows\\System32\\config\\systemprofile\\AppData\\Local\\CentraStage\\\`" /S /Q 2>nul\nrmdir \`"C:\\Windows\\SysWOW64\\config\\systemprofile\\AppData\\Local\\CentraStage\\\`" /S /Q 2>nul\nrmdir \`"%userprofile%\\AppData\\Local\\CentraStage\\\`" /S /Q 2>nul\nrmdir \`"%allusersprofile%\\CentraStage\\\`" /S /Q 2>nul\nREG delete \`"HKEY_LOCAL_MACHINE\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Run\`" /v CentraStage /f 2>nul\necho RMM Uninstall is Complete"
 
 			$FormBody = '[["All Machines"],[{"SessionID": "' + $SC_ID + '","EventType":44,"Data":"' + $RMMUninstallCmd + '"}]]'
-			$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/PageService.ashx/AddSessionEvents" -WebSession $SCWebSession -Headers @{"X-Anti-Forgery-Token" = $AntiForgeryToken} -Body $FormBody -Method 'POST' -ContentType 'application/json'
+			$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/PageService.ashx/AddSessionEvents" -UseBasicParsing -WebSession $SCWebSession -Headers @{"X-Anti-Forgery-Token" = $AntiForgeryToken} -Body $FormBody -Method 'POST' -ContentType 'application/json'
 			return $true
 		} else {
 			Write-Warning "Could not get an anti-forgery token from Screenconnect. Failed to uninstall RMM for SC device ID: $SC_ID"
@@ -1348,15 +1348,15 @@ if ($true) {
 
 	function install_rmm_using_sc($SC_ID, $RMM_ORG_ID, $SCWebSession) {
 		# Get an anti-forgery token from the website
-		$Response = Invoke-WebRequest "$($SCLogin.URL)/Host#Access/All%20Machines//$SC_ID" -WebSession $SCWebSession -Method 'POST' -ContentType 'application/json'
+		$Response = Invoke-WebRequest "$($SCLogin.URL)/Host#Access/All%20Machines//$SC_ID" -UseBasicParsing -WebSession $SCWebSession -Method 'POST' -ContentType 'application/json'
 		$Response.RawContent -match '"antiForgeryToken":"(.+?)"' | Out-Null
 		$AntiForgeryToken = $matches[1]
 
 		if ($AntiForgeryToken) {
-			$RMMInstallCmd = "#timeout=100000\npowershell -command \`"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://$($DattoAPIKey.Region).centrastage.net/csm/profile/downloadAgent/$RMM_ORG_ID' -OutFile c:\\windows\\temp\\RMM-Installer.exe; c:\\windows\\temp\\RMM-Installer.exe /s; Write-Host 'RMM Install Complete';\`""
+			$RMMInstallCmd = "#timeout=100000\npowershell -command \`"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://$($DattoAPIKey.Region).centrastage.net/csm/profile/downloadAgent/$RMM_ORG_ID' -UseBasicParsing -OutFile c:\\windows\\temp\\RMM-Installer.exe; c:\\windows\\temp\\RMM-Installer.exe /s; Write-Host 'RMM Install Complete';\`""
 
 			$FormBody = '[["All Machines"],[{"SessionID": "' + $SC_ID + '","EventType":44,"Data":"' + $RMMInstallCmd + '"}]]'
-			$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/PageService.ashx/AddSessionEvents" -WebSession $SCWebSession -Headers @{"X-Anti-Forgery-Token" = $AntiForgeryToken} -Body $FormBody -Method 'POST' -ContentType 'application/json'
+			$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/PageService.ashx/AddSessionEvents" -UseBasicParsing -WebSession $SCWebSession -Headers @{"X-Anti-Forgery-Token" = $AntiForgeryToken} -Body $FormBody -Method 'POST' -ContentType 'application/json'
 			$Removed = remove_device_from_install_queue -SC_ID $SC_ID -ToInstall "rmm"
 			return $true
 		} else {
@@ -1367,7 +1367,7 @@ if ($true) {
 
 	function install_rmm_using_sc_mac($SC_ID, $RMM_ORG_ID, $SCWebSession) {
 		# Get an anti-forgery token from the website
-		$Response = Invoke-WebRequest "$($SCLogin.URL)/Host#Access/All%20Machines//$SC_ID" -WebSession $SCWebSession -Method 'POST' -ContentType 'application/json'
+		$Response = Invoke-WebRequest "$($SCLogin.URL)/Host#Access/All%20Machines//$SC_ID" -UseBasicParsing -WebSession $SCWebSession -Method 'POST' -ContentType 'application/json'
 		$Response.RawContent -match '"antiForgeryToken":"(.+?)"' | Out-Null
 		$AntiForgeryToken = $matches[1]
 	
@@ -1375,9 +1375,9 @@ if ($true) {
 			$RMMInstallCmd = "#timeout=100000\n#!bash\ncd /tmp\ncurl -o rmm-installer.zip 'https://$($DattoAPIKey.Region).centrastage.net/csm/profile/downloadMacAgent/$RMM_ORG_ID'\nunzip -a rmm-installer.zip\ncd AgentSetup\nsudo installer -pkg CAG.pkg -target /"
 	
 			$FormBody = '[["All Machines"],[{"SessionID": "' + $SC_ID + '","EventType":44,"Data":"' + $RMMInstallCmd + '"}]]'
-			$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/PageService.ashx/AddSessionEvents" -WebSession $SCWebSession -Headers @{"X-Anti-Forgery-Token" = $AntiForgeryToken} -Body $FormBody -Method 'POST' -ContentType 'application/json'
+			$Response = Invoke-WebRequest "$($SCLogin.URL)/Services/PageService.ashx/AddSessionEvents" -UseBasicParsing -WebSession $SCWebSession -Headers @{"X-Anti-Forgery-Token" = $AntiForgeryToken} -Body $FormBody -Method 'POST' -ContentType 'application/json'
 			$Removed = remove_device_from_install_queue -SC_ID $SC_ID -ToInstall "rmm"
-	
+
 			return $true
 		} else {
 			Write-Warning "Could not get an anti-forgery token from Screenconnect. Failed to install RMM for SC device ID: $SC_ID"

@@ -144,7 +144,7 @@ if ($Ninite_Login.Email) {
 		}
 
 		# Get the xsrf token from the form
-		$NiniteSignInPage = Invoke-WebRequest "$($Ninite_Login.BaseURI)signin/" -SessionVariable 'NiniteWebSession'
+		$NiniteSignInPage = Invoke-WebRequest "$($Ninite_Login.BaseURI)signin/" -SessionVariable 'NiniteWebSession' -UseBasicParsing
 		$XSRFToken = ($NiniteSignInPage.InputFields | Where-Object { $_.name -eq "_xsrf" }).value
 
 		if (!$XSRFToken) {
@@ -162,7 +162,7 @@ if ($Ninite_Login.Email) {
 			}
 
 			try {
-				$NiniteAuthResponse = Invoke-WebRequest "$($Ninite_Login.BaseURI)signin/" -WebSession $NiniteWebSession -Body $FormBody -Method 'POST' -ContentType 'application/x-www-form-urlencoded'
+				$NiniteAuthResponse = Invoke-WebRequest "$($Ninite_Login.BaseURI)signin/" -UseBasicParsing -WebSession $NiniteWebSession -Body $FormBody -Method 'POST' -ContentType 'application/x-www-form-urlencoded'
 			} catch {
 				$attempt--
 				Write-Host "Failed to connect to: Ninite"
@@ -190,7 +190,7 @@ if ($Ninite_Login.Email) {
 				}
 
 				try {
-					$NiniteAuthResponse = Invoke-WebRequest "$($Ninite_Login.BaseURI)me/2fa/challenge" -WebSession $NiniteWebSession -Body $FormBody -Method 'POST' -ContentType 'application/x-www-form-urlencoded'
+					$NiniteAuthResponse = Invoke-WebRequest "$($Ninite_Login.BaseURI)me/2fa/challenge" -UseBasicParsing -WebSession $NiniteWebSession -Body $FormBody -Method 'POST' -ContentType 'application/x-www-form-urlencoded'
 				} catch {
 					$attempt--
 					Write-Host "Failed to connect to: Ninite"
@@ -240,7 +240,7 @@ while ($attempt -ge 0) {
 	) | ConvertTo-Json
 
 	try {
-		$AuthResponse = Invoke-WebRequest "$($SCLogin.URL)/Services/AuthenticationService.ashx/TryLogin" -SessionVariable 'SCWebSession' -Body $FormBody -Method 'POST' -ContentType 'application/json'
+		$AuthResponse = Invoke-WebRequest "$($SCLogin.URL)/Services/AuthenticationService.ashx/TryLogin" -UseBasicParsing -SessionVariable 'SCWebSession' -Body $FormBody -Method 'POST' -ContentType 'application/json'
 	} catch {
 		$attempt--
 		Write-PSFMessage -Level Error -Message "Failed to connect to: ScreenConnect"
@@ -260,7 +260,7 @@ while ($attempt -ge 0) {
 	}
 
 	# Download the full device list report and then import it
-	$Response = Invoke-WebRequest "$($SCLogin.URL)/Report.csv?ReportType=Session&SelectFields=SessionID&SelectFields=Name&SelectFields=GuestMachineName&SelectFields=GuestMachineSerialNumber&SelectFields=GuestHardwareNetworkAddress&SelectFields=GuestOperatingSystemName&SelectFields=GuestLastActivityTime&SelectFields=GuestInfoUpdateTime&SelectFields=GuestLastBootTime&SelectFields=GuestLoggedOnUserName&SelectFields=GuestLoggedOnUserDomain&SelectFields=GuestMachineManufacturerName&SelectFields=GuestMachineModel&SelectFields=GuestMachineDescription&SelectFields=CustomProperty1&SelectFields=GuestSystemMemoryTotalMegabytes&SelectFields=GuestProcessorName&SelectFields=GuestProcessorVirtualCount&Filter=SessionType%20%3D%20'Access'%20AND%20NOT%20IsEnded&AggregateFilter=&ItemLimit=100000" -WebSession $SCWebSession
+	$Response = Invoke-WebRequest "$($SCLogin.URL)/Report.csv?ReportType=Session&SelectFields=SessionID&SelectFields=Name&SelectFields=GuestMachineName&SelectFields=GuestMachineSerialNumber&SelectFields=GuestHardwareNetworkAddress&SelectFields=GuestOperatingSystemName&SelectFields=GuestLastActivityTime&SelectFields=GuestInfoUpdateTime&SelectFields=GuestLastBootTime&SelectFields=GuestLoggedOnUserName&SelectFields=GuestLoggedOnUserDomain&SelectFields=GuestMachineManufacturerName&SelectFields=GuestMachineModel&SelectFields=GuestMachineDescription&SelectFields=CustomProperty1&SelectFields=GuestSystemMemoryTotalMegabytes&SelectFields=GuestProcessorName&SelectFields=GuestProcessorVirtualCount&Filter=SessionType%20%3D%20'Access'%20AND%20NOT%20IsEnded&AggregateFilter=&ItemLimit=100000" -UseBasicParsing -WebSession $SCWebSession
 	$SC_Devices_Full = $Response.Content | ConvertFrom-Csv
 
 	# If bad results
@@ -303,7 +303,7 @@ if ($NiniteAuthResponse) {
 		params = @{}
 	} | ConvertTo-Json
 
-	$NiniteResponse = Invoke-WebRequest "$($Ninite_Login.BaseURI)remote/rpc_web" -WebSession $NiniteWebSession -Headers $NiniteHeader -Body $FormBody -Method 'POST' -ContentType 'application/json; charset=utf-8'
+	$NiniteResponse = Invoke-WebRequest "$($Ninite_Login.BaseURI)remote/rpc_web" -UseBasicParsing -WebSession $NiniteWebSession -Headers $NiniteHeader -Body $FormBody -Method 'POST' -ContentType 'application/json; charset=utf-8'
 	$Ninite_OrgInfo = $NiniteResponse.Content | ConvertFrom-Json
 
 
@@ -321,7 +321,7 @@ if ($NiniteAuthResponse) {
 			}
 		} | ConvertTo-Json
 
-		$NiniteResponse = Invoke-WebRequest "$($Ninite_Login.BaseURI)remote/rpc_web" -WebSession $NiniteWebSession -Headers $NiniteHeader -Body $FormBody -Method 'POST' -ContentType 'application/json; charset=utf-8'
+		$NiniteResponse = Invoke-WebRequest "$($Ninite_Login.BaseURI)remote/rpc_web" -UseBasicParsing -WebSession $NiniteWebSession -Headers $NiniteHeader -Body $FormBody -Method 'POST' -ContentType 'application/json; charset=utf-8'
 		$Ninite_Machines += ($NiniteResponse.Content | ConvertFrom-Json).result
 		Start-Sleep -Seconds 1
 	}
